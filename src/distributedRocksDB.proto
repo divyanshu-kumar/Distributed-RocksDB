@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package DistributedRocksDB;
+
+message SerializeByte {
+	bytes buffer = 1;
+}
+
+message ReadResult{
+    bytes value = 1;
+    int32 err = 2;
+}
+
+message ReadRequest{
+    uint32 key = 1;
+    bool requirecache = 2;
+    string clientidentifier = 3;
+}
+
+message WriteRequest{
+    uint32 key = 1;
+    bytes value = 2;
+    string clientidentifier = 3;
+}
+
+message WriteResult{
+    int32 err = 1;
+}
+
+message ClientCacheNotify {
+    int32 key = 1;
+}
+
+message SubscribeForNotifications {
+    string identifier = 1;
+}
+
+message Heartbeat {
+    string msg = 1;
+}
+
+service DistributedRocksDBService {
+    rpc rpc_read(ReadRequest) returns (ReadResult) {}
+    rpc rpc_write(WriteRequest) returns (WriteResult) {}
+    rpc rpc_subscribeForNotifications(SubscribeForNotifications) returns (stream ClientCacheNotify) {}
+    rpc rpc_unSubscribeForNotifications(SubscribeForNotifications) returns (SubscribeForNotifications) {}
+    rpc rpc_heartbeatListener(Heartbeat) returns (stream Heartbeat) {}
+}
