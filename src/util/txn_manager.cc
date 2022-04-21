@@ -1,4 +1,6 @@
 #include "txn_manager.h"
+#include <future>
+#include <chrono>
 
 int TxnManager::extractLogIndex(char* _fileName) {
     string fileName(_fileName);
@@ -31,6 +33,19 @@ int TxnManager::computeLastLogIndex() {
 
 string TxnManager::computeLogPath(int logIndex) {
     return storage_path + "/" + LOG_PREFIX + to_string(logIndex);
+}
+
+unique_lock<shared_mutex> TxnManager::getPutLock(string key) {
+    outer_mutex.lock();
+    shared_mutex &key_mutex = mutices[key];
+    outer_mutex.unlock();
+
+    return unique_lock(key_mutex);
+}
+
+void TxnManager::releasePutLock(unique_lock<shared_mutex>& key_mutex)
+{
+    key_mutex.unlock();
 }
 
 TxnManager::TxnManager(string _storage_path) {
@@ -92,21 +107,79 @@ vector<string> TxnManager::getTxnKeys(int logIndex) {
     return keys;
 }
 
-int main() {
-    TxnManager tm("/users/dkumar27/Distributed-RocksDB/logs");
+void exec(string key, TxnManager *tm, int tid, chrono::time_point<chrono::high_resolution_clock> begin) {
+    auto lock = tm->getPutLock(key);
 
-    tm.put("hello1", "world1");
+    auto first = chrono::high_resolution_clock::now();
+    uint64_t started = chrono::duration_cast<chrono::nanoseconds> (first - begin).count();
+    cout << "TID: " << tid << ", started:" << started << endl;
 
-    cout << tm.get("hello1") << endl;
+    tm->put(key, key);
+    tm->releasePutLock(lock);
 
-    string noVal = tm.get("h");
+    auto second = chrono::high_resolution_clock::now();
+    uint64_t ended = chrono::duration_cast<chrono::nanoseconds> (second - begin).count();
+    cout << "TID: " << tid << ", ended:" << ended << endl;
+}
 
-    if (noVal.empty()) {
-        cout << "noVal" << endl;
+void testMultiThreadDiff(TxnManager *tm) {
+    int N = 3;
+    future<void> workers[N];
+
+    auto begin = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < N; i++) {
+        workers[i] = async(exec, to_string(i), tm, i, begin); 
     }
 
-    tm.flush();
-    tm.getTxnKeys(0);
+    for (int i = 0; i < N; i++) {
+        workers[i].get();
+    }
+}
+
+void testMultiThreadSame(TxnManager *tm) {
+    int N = 3;
+    future<void> workers[N];
+
+    auto begin = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < N; i++) {
+        workers[i] = async(exec, to_string(10), tm, i, begin); 
+    }
+
+    for (int i = 0; i < N; i++) {
+        workers[i].get();
+    }
+}
+
+int main() {
+    TxnManager *tm = new TxnManager("/users/dkumar27/Distributed-RocksDB/logs");
+
+    auto begin = chrono::high_resolution_clock::now();
+    testMultiThreadDiff(tm);
+    auto end = chrono::high_resolution_clock::now();
+    uint64_t time_taken = chrono::duration_cast<chrono::nanoseconds> (end - begin).count();
+    cout << "time_taken[DIff]:" << time_taken << endl;
+
+    begin = chrono::high_resolution_clock::now();
+    testMultiThreadSame(tm);
+    end = chrono::high_resolution_clock::now();
+    time_taken = chrono::duration_cast<chrono::nanoseconds> (end - begin).count();
+    cout << "time_taken[Same]:" << time_taken << endl;
+
+    // tm.put("hello1", "world1");
+
+    // cout << tm.get("hello1") << endl;
+
+    // string noVal = tm.get("h");
+
+    // if (noVal.empty()) {
+    //     cout << "noVal" << endl;
+    // }
+
+    // tm.flush();
+    // tm.getTxnKeys(0);
+
 
     return 0;
 }

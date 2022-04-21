@@ -1,16 +1,22 @@
 #include <iostream>
+#include <mutex>
+#include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include <fstream>
 #include <iterator>
 #include <dirent.h>
 #include <cstring>
+#include <chrono>
 
 using namespace std;
 
 class TxnManager {
     private:
+        mutex outer_mutex;
         unordered_map<string,string> txns;
+        unordered_map<string, shared_mutex> mutices;
         string storage_path;
         int lastLogIndex;
         const string LOG_PREFIX = string("self.log.");
@@ -38,6 +44,7 @@ class TxnManager {
          * @return string 
          */
         string computeLogPath(int logIndex);
+
 
     public:
         /**
@@ -83,4 +90,19 @@ class TxnManager {
          * @return vector<string> 
          */
         vector<string> getTxnKeys(int logIndex);
+
+        /**
+         * @brief Get the Put Lock object
+         * 
+         * @param key 
+         * @return unique_lock<shared_mutex> 
+         */
+        unique_lock<shared_mutex> getPutLock(string key);
+
+        /**
+         * @brief releases the put lock
+         * 
+         * @param key_mutex 
+         */
+        void releasePutLock(unique_lock<shared_mutex>& key_mutex);
 };
