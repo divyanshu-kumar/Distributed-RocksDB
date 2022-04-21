@@ -367,8 +367,6 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     void updateSystemView(SystemState systemStateMsg) {
         lock_guard<mutex> guard(systemStateLock);
 
-        const string prevRole(role);
-
         primaryAddress = systemStateMsg.primary();
 
         if (primaryAddress == my_address) {
@@ -376,23 +374,31 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
         else {
             role = "backup";
+            return;
         }
 
-        backups.clear();
+        unordered_set<string> newBackups;
         
         for (auto backupAddress : systemStateMsg.backups()) {
-            backups.insert(backupAddress);
-        }
-
-        if (prevRole == "backup" && role == "primary") {
-            cout << __func__ << "\t : I am primary node now! Creating channels with backup nodes.." << endl;
-            // create channels with all nodes
-            for (auto backup : backups) {
+            newBackups.insert(backupAddress);
+            if (backups.find(backupAddress) == backups.end()) {
+                cout << __func__ << 
+                    "\t : Adding node " << backupAddress << endl;
                 std::shared_ptr<Channel> channel = grpc::CreateChannel(
-                    backup.c_str(), grpc::InsecureChannelCredentials());
-                stubs[backup] = DistributedRocksDBService::NewStub(channel);
+                    backupAddress.c_str(), grpc::InsecureChannelCredentials());
+                stubs[backupAddress] = DistributedRocksDBService::NewStub(channel);
             }
         }
+
+        for (auto backup : backups) {
+            if (newBackups.find(backup) == newBackups.end()) {
+                cout << __func__ << 
+                    "\t : Removing node " << backup << endl;
+                stubs.erase(backup);
+            }
+        }
+
+        swap(newBackups, backups);
     }
 };
 

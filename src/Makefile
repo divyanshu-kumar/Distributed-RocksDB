@@ -51,7 +51,7 @@ coordinator: distributedRocksDB.pb.o distributedRocksDB.grpc.pb.o coordinator.o
 	$(PROTOC) -I $(PROTOS_PATH) --cpp_out=. $<
 
 clean:
-	rm -f *.o *.pb.cc *.pb.h client server
+	rm -f *.o *.pb.cc *.pb.h client server coordinator
 
 
 # The following is to test your system and ensure a smoother experience.
