@@ -28,7 +28,7 @@ Then run client:
 ```
 (for now pass the address of primary. Eventually this address will be foundout from the coordinator node.)
 
-Using CMake:
+Using CMake - Run the following command from `/src` directory:
 ```
 ./build.sh
 ```
