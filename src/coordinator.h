@@ -92,6 +92,9 @@ class Coordinator final : public DistributedRocksDBService::Service {
                          << endl;
                     electPrimary();
                 }
+                else {
+                    backups.erase(address);
+                }
                 return;
             }
 
