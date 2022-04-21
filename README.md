@@ -11,19 +11,19 @@ To build (in dir = DistributedRocksDB/src):
 source make.sh
 ```
 
-First run server:
+Run coordinator:
 ```
-./server --role=primary --my_address=0.0.0.0:50051 --other_address=0.0.0.0:50053
+./coordinator --my_address=0.0.0.0:50050
 ```
 
-Optionally run backup server:
+For running server (primary/backup):
 ```
-./server --role=backup --my_address=0.0.0.0:50053 --other_address=0.0.0.0:50051
+./server --my_address=0.0.0.0:50051 --coordinator_address=0.0.0.0:50050
 ```
+(my_address needs to be unique for each server).
 
 Then run client:
 ```
-./client
+./client --address1=0.0.0.0:50051
 ```
-
-junk
+(for now pass the address of primary. Eventually this address will be foundout from the coordinator node.)
