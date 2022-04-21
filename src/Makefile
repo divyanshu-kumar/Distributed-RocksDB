@@ -31,13 +31,16 @@ PROTOS_PATH = ./
 
 vpath %.proto $(PROTOS_PATH)
 
-all: system-check client server
+all: system-check client server coordinator
 
 client: distributedRocksDB.pb.o distributedRocksDB.grpc.pb.o client.o  
 	$(CXX) $^ $(LDFLAGS) -o $@
 
 server: distributedRocksDB.pb.o distributedRocksDB.grpc.pb.o server.o
 	$(CXX) $^ $(LDFLAGS) -o $@ ../librocksdb.a -I../include -O2 -std=c++17 $(PLATFORM_LDFLAGS) $(PLATFORM_CXXFLAGS) $(EXEC_LDFLAGS)
+
+coordinator: distributedRocksDB.pb.o distributedRocksDB.grpc.pb.o coordinator.o
+	$(CXX) $^ $(LDFLAGS) -o $@
 
 .PRECIOUS: %.grpc.pb.cc
 %.grpc.pb.cc: %.proto

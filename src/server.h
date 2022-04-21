@@ -33,14 +33,11 @@ const int MULTIPLIER = 2;
 
 string currentWorkDir, dataDirPath, writeTxLogsDirPath;
 
-static string role, other_address, my_address;
+static string role, my_address, coordinator_address;
 
 static unordered_map<int, std::mutex> blockLock;
 unordered_map<int, struct timespec> backupLastWriteTime;
 
-thread heartbeatThread;
-bool heartbeatShouldRun;
-bool isBackupAvailable;
 bool crashTestingEnabled(false);
 
 void    rollbackUncommittedWrites();
@@ -159,55 +156,67 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     ServerReplication() { }
 
-    ServerReplication(std::shared_ptr<Channel> channel)
-        : stub_(DistributedRocksDBService::NewStub(channel)) { }
-
     int rpc_write(uint32_t key, const string& value) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Key " << key << ", role " << role << endl;
         }
 
-        WriteResult wres;
-        bool isDone = false;
-        int numRetriesLeft = MAX_NUM_RETRIES;
-        unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+        systemStateLock.lock();
+        unordered_set<string> currentBackups(backups);
+        systemStateLock.unlock();
 
-        while (!isDone) {
-            ClientContext ctx;
-            WriteRequest wreq;
-            wreq.set_key(key);
-            wreq.set_value(value);
+        // TODO : Just modified sequentially for now. 
+        // Issue "Replicate Writes #12" to fix this for parallel execution.
+        for (auto backupAddress : currentBackups) {
+            WriteResult wres;
+            bool isDone = false;
+            int numRetriesLeft = MAX_NUM_RETRIES;
+            unsigned int currentBackoff = INITIAL_BACKOFF_MS;
 
-            std::chrono::system_clock::time_point deadline =
-                std::chrono::system_clock::now() +
-                std::chrono::milliseconds(currentBackoff);
+            while (!isDone) {
+                ClientContext ctx;
+                WriteRequest wreq;
+                wreq.set_key(key);
+                wreq.set_value(value);
 
-            ctx.set_wait_for_ready(true);
-            ctx.set_deadline(deadline);
+                std::chrono::system_clock::time_point deadline =
+                    std::chrono::system_clock::now() +
+                    std::chrono::milliseconds(currentBackoff);
 
-            Status status = stub_->rpc_write(&ctx, wreq, &wres);
-            currentBackoff *= MULTIPLIER;
-            if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED ||
-                numRetriesLeft-- == 0) {
-                if (numRetriesLeft <= 0) {
-                    if (debugMode <= DebugLevel::LevelError) {
-                        printf("%s \t : Backup server seems offline\n", __func__);
+                ctx.set_wait_for_ready(true);
+                ctx.set_deadline(deadline);
+
+                Status status = stubs[backupAddress]->rpc_write(&ctx, wreq, &wres);
+                currentBackoff *= MULTIPLIER;
+                if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED ||
+                    numRetriesLeft-- == 0) {
+                    if (numRetriesLeft <= 0) {
+                        if (debugMode <= DebugLevel::LevelError) {
+                            printf("%s \t : Backup server seems offline\n", __func__);
+                        }
+                        return -1;
                     }
-                    return -1;
+                    isDone = true;
+                } else {
+                    // printf("%s \t : Timed out to contact server. Retrying...\n",
+                    // __func__);
                 }
-                isDone = true;
-            } else {
-                // printf("%s \t : Timed out to contact server. Retrying...\n",
-                // __func__);
+            }
+
+            if (wres.err() != 0) { // TODO : maybe continue sending to others on one backup's failure
+                return wres.err();
             }
         }
 
-        return wres.err();
+        return 0;
     }
 
     Status rpc_read(ServerContext* context, const ReadRequest* rr,
                     ReadResult* reply) override {
+        systemStateLock.lock();
         const string currentRole = role;
+        systemStateLock.unlock();
+
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Key " << rr->key() << ", role " << currentRole << endl;
         }
@@ -242,10 +251,13 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     Status rpc_write(ServerContext* context, const WriteRequest* wr,
                      WriteResult* reply) override {
+        systemStateLock.lock();
         const string currentRole = role;
+        systemStateLock.unlock();
+
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Key " << wr->key() << ", role " << currentRole 
-                 << ", isBackupAvailable = " << isBackupAvailable << endl;
+                 << endl;
         }
 
         lock_guard<mutex> guard(blockLock[wr->key()]);
@@ -275,17 +287,11 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         reply->set_err(0);
         
         if (currentRole == "primary") {
-            if (backupSyncState.isOutOfSync()) {
-                backupSyncState.logOutOfSync(wr->key());
-                if (isBackupAvailable && backupSyncState.isOutOfSync()) {
-                    backupSyncState.sync();
-                }
-            } else {
-                int result = isBackupAvailable ? 
-                    this->rpc_write(wr->key(), wr->value()) : 0;
-                if (result != 0) {
-                    backupSyncState.logOutOfSync(wr->key());
-                }
+            int result = this->rpc_write(wr->key(), wr->value());
+            if (result != 0) {
+                // backupSyncState.logOutOfSync(wr->key());
+                printf("%s \t : Error : Failed to write to backups",
+                __func__);
             }
         }
 
@@ -334,66 +340,135 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         return Status::OK;
     }
 
-    void rpc_heartbeatSender() {
+    Status rpc_heartbeat(ServerContext* context,
+                        ServerReader<SystemState>* reader,
+                        Heartbeat* response) override {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << endl;
         }
 
-        ClientContext context;
-        Heartbeat heartbeatReq, heartbeatRes;
+        SystemState systemStateMsg;
 
-        heartbeatReq.set_msg("");
-
-        std::unique_ptr<ClientReader<Heartbeat>> reader(
-            stub_->rpc_heartbeatListener(&context, heartbeatReq));
-
-        while (reader->Read(&heartbeatRes)) {
-            auto message = heartbeatRes.msg();
-            if (!message.empty() && message == "OK") {
-                cout << __func__ << "\t : Starting to sync with backup server!" << endl;
-                backupSyncState.sync();
-                isBackupAvailable = true;
-            }
-            else {
-                cout << __func__ << "\t : Heartbeat connection broken." << endl;
-            }
+        while (reader->Read(&systemStateMsg)) {
+            updateSystemView(systemStateMsg);
         }
 
-        Status status = reader->Finish();
-        if (!status.ok()) {
-            // if (debugMode <= DebugLevel::LevelInfo) {
-            //     cout << __func__ << "\t : Status returned as "
-            //          << status.error_message() << endl;
-            // }
-        }
-    }
-
-    Status rpc_heartbeatListener(ServerContext* context,
-                                 const Heartbeat* heartbeatMessage,
-                                 ServerWriter<Heartbeat>* writer) override {
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << endl;
-        }
-        Heartbeat heartbeatResult;
-        heartbeatResult.set_msg("OK");
-        bool isFirstMsgSent(false);
-
-        while (true) {
-            if (!isFirstMsgSent) {
-                writer->Write(heartbeatResult);
-                isFirstMsgSent = true;
-            }
-            msleep(500);
-        }
+        response->set_msg("OK");
 
         return Status::OK;
     }
 
    private:
-    std::unique_ptr<DistributedRocksDBService::Stub> stub_;
+    mutex systemStateLock;
+    string primaryAddress;
+    unordered_set<string> backups;
+    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>> stubs;
+
+    void updateSystemView(SystemState systemStateMsg) {
+        lock_guard<mutex> guard(systemStateLock);
+
+        const string prevRole(role);
+
+        primaryAddress = systemStateMsg.primary();
+
+        if (primaryAddress == my_address) {
+            role = "primary";
+        }
+        else {
+            role = "backup";
+        }
+
+        backups.clear();
+        
+        for (auto backupAddress : systemStateMsg.backups()) {
+            backups.insert(backupAddress);
+        }
+
+        if (prevRole == "backup" && role == "primary") {
+            cout << __func__ << "\t : I am primary node now! Creating channels with backup nodes.." << endl;
+            // create channels with all nodes
+            for (auto backup : backups) {
+                std::shared_ptr<Channel> channel = grpc::CreateChannel(
+                    backup.c_str(), grpc::InsecureChannelCredentials());
+                stubs[backup] = DistributedRocksDBService::NewStub(channel);
+            }
+        }
+    }
 };
 
 static ServerReplication* serverReplication;
+
+void registerServer() {
+    msleep(100);
+
+    std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_(DistributedRocksDBService::NewStub(grpc::CreateChannel(
+                coordinator_address.c_str(), grpc::InsecureChannelCredentials())));
+
+    if (debugMode <= DebugLevel::LevelInfo) {
+        printf("%s : Attempting to register with coordinator = %s\n", __func__, coordinator_address.c_str());
+    }
+
+    RegisterResult registerResult;
+
+    bool isDone = false;
+    int numRetriesLeft = MAX_NUM_RETRIES;
+    unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+    int error_code = 0;
+
+    while (!isDone) {
+        ClientContext ctx;
+        RegisterRequest registerRequest;
+        registerRequest.set_address(my_address);
+        
+        std::chrono::system_clock::time_point deadline =
+            std::chrono::system_clock::now() +
+            std::chrono::milliseconds(currentBackoff);
+
+        ctx.set_wait_for_ready(true);
+        ctx.set_deadline(deadline);
+
+        Status status = coordinator_stub_->rpc_registerNewNode(&ctx, registerRequest, &registerResult);
+        error_code = status.error_code();
+        currentBackoff *= MULTIPLIER;
+
+        if (status.error_code() == grpc::StatusCode::OK ||
+            numRetriesLeft-- == 0) {
+            isDone = true;
+        } else {
+            if (debugMode <= DebugLevel::LevelInfo) {
+                printf("%s \t : Timed out to contact coordinator server.\n", __func__);
+                cout << __func__
+                        << "\t : Error code = " << status.error_message()
+                        << endl;
+            }
+            if (debugMode <= DebugLevel::LevelError) {
+                cout << __func__ << "\t : Retrying to " 
+                        << coordinator_address << " with timeout (ms) of "
+                        << currentBackoff << endl;
+            }
+        }
+    }
+
+    if (error_code != grpc::StatusCode::OK) {
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : Failed because of timeout!" << endl;
+        }
+        return;
+    }
+    else {
+        string assignedResult = registerResult.result();
+        if (assignedResult == "primary" || assignedResult == "backup") {
+            role = assignedResult;
+            cout << __func__ << "\t : Role assigned as " << role << endl;
+        }
+        else {
+            cout << __func__ << "\t : Was not able to get an assigned role!" << endl;
+            quick_exit(EXIT_SUCCESS);
+        }
+    }
+
+    return;
+}
 
 void BackupOutOfSync::logOutOfSync(const int address) {
     lock_guard<mutex> guard(m_lock);
@@ -496,24 +571,4 @@ void rollbackUncommittedWrites() {
     }
 
     closedir(dir);
-}
-
-
-void runHeartbeat() {
-    if (debugMode <= DebugLevel::LevelError) {
-        cout << __func__ << "\t : Starting heartbeat service!" << endl;
-    }
-    while (heartbeatShouldRun) {
-        serverReplication->rpc_heartbeatSender();
-        isBackupAvailable = false;
-        if (role == "backup") {
-            if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__
-                     << "\t : Backup is switching to Primary mode now." << endl;
-            }
-            role = "primary";
-            backupLastWriteTime.clear();
-        }
-        msleep(500);
-    }
 }

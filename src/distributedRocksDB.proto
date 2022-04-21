@@ -39,10 +39,29 @@ message Heartbeat {
     string msg = 1;
 }
 
+message RegisterRequest {
+    string address = 1;
+}
+
+message RegisterResult {
+    string result = 1;
+}
+
+message SystemStateRequest {
+    string request = 1;
+}
+
+message SystemState {
+    string primary = 1;
+    repeated string backups = 2;
+}
+
 service DistributedRocksDBService {
     rpc rpc_read(ReadRequest) returns (ReadResult) {}
     rpc rpc_write(WriteRequest) returns (WriteResult) {}
     rpc rpc_subscribeForNotifications(SubscribeForNotifications) returns (stream ClientCacheNotify) {}
     rpc rpc_unSubscribeForNotifications(SubscribeForNotifications) returns (SubscribeForNotifications) {}
-    rpc rpc_heartbeatListener(Heartbeat) returns (stream Heartbeat) {}
+    rpc rpc_heartbeat(stream SystemState) returns (Heartbeat) {}
+    rpc rpc_registerNewNode(RegisterRequest) returns (RegisterResult) {}
+    rpc rpc_getSystemState(SystemStateRequest) returns (SystemState) {}
 }

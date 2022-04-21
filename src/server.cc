@@ -24,6 +24,9 @@ void RunServer() {
 
     std::cout << "Server listening on " << my_address << std::endl;
 
+    std::thread registerThread(registerServer);
+    registerThread.detach();
+
     server->Wait();
 }
 
@@ -41,28 +44,26 @@ int main(int argc, char** argv) {
             argumentString.append(argv[arg]);
             argumentString.push_back(' ');
         }
-        role = parseArgument(argumentString, "--role=");
+        
         my_address = parseArgument(argumentString, "--my_address=");
-        other_address = parseArgument(argumentString, "--other_address=");
+        coordinator_address = parseArgument(argumentString, "--coordinator_address=");
+        
         crashTestingEnabled = parseArgument(argumentString, "--crash=") == "true" ? true : false;
 
-        if (!isRoleValid(role) || !isIPValid(my_address) || !isIPValid(other_address)) {
-            cout << "Role = " << role << "\nMy Address = " << my_address << 
-            "\nOther Address = " << other_address << endl;
-            role = "";
+        if (!isIPValid(my_address) || !isIPValid(coordinator_address)) {
+            cout << "\nMy Address = " << my_address << ", Coordinator Address = " << coordinator_address << endl;
+            my_address = "";
         }
     }
 
-    if (role.empty() || my_address.empty()) {
+    if (my_address.empty() || coordinator_address.empty()) {
         printf(
             "Enter arguments like below and try again - \n"
-            "./server --role=[primary or backup] "
-            "--my_address=[IP:PORT] --other_address=[IP:PORT]\n");
+            "./server --my_address=[IP:PORT] --coordinator_address=[IP:PORT]\n");
         return 0;
     }
 
-    cout << "Role = " << role << "\nMy Address = " << my_address
-         << "\nOther Address = " << other_address << endl;
+    cout << "\nMy Address = " << my_address << ", Coordinator Address = " << coordinator_address << endl;
 
     kDBPath = kDBPath + my_address;
 
@@ -78,21 +79,11 @@ int main(int argc, char** argv) {
     ROCKSDB_NAMESPACE::Status s = DB::Open(options, kDBPath, &db);
     assert(s.ok());
 
-    serverReplication = new ServerReplication(grpc::CreateChannel(
-        other_address.c_str(), grpc::InsecureChannelCredentials()));
-
-    rollbackUncommittedWrites();
+    serverReplication = new ServerReplication;
 
     backupLastWriteTime.clear();
 
-    isBackupAvailable = true;
-    heartbeatShouldRun = true;
-    heartbeatThread = thread(runHeartbeat);
-
     RunServer();
-
-    heartbeatShouldRun = false;
-    heartbeatThread.join();
 
     delete serverReplication;
     delete db;
@@ -101,7 +92,6 @@ int main(int argc, char** argv) {
 }
 
 /*
-Example server commands:
-For primary, in src folder : ./server --role=primary --my_address=0.0.0.0:50051 --other_address=0.0.0.0:50053
-For backup, in folder BackupServer: ./server --role=backup --my_address=0.0.0.0:50053 --other_address=0.0.0.0:50051
+Example server commands (my_address should be unique to this server):
+In src folder : ./server --my_address=0.0.0.0:50051 --coordinator_address=0.0.0.0:50053
 */
