@@ -27,3 +27,8 @@ Then run client:
 ./client --address1=0.0.0.0:50051
 ```
 (for now pass the address of primary. Eventually this address will be foundout from the coordinator node.)
+
+Using CMake:
+```
+./build.sh
+```

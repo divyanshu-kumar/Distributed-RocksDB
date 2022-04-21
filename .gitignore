@@ -1,3 +1,17 @@
 .vscode/settings.json
 src/readTimes.txt
 src/writeTimes.txt
+*.pb.cc
+*.pb.h
+*.pb.o
+librocksdb.a
+src/writeTimes.txt
+src/readTimes.txt
+src/server.o
+src/server
+src/coordinator
+src/coordinator.o
+src/client
+src/client.o
+logs/*
+src/cmake/build/
