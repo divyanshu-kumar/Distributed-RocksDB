@@ -30,9 +30,9 @@ class DistributedRocksDBClient {
         : stub_(DistributedRocksDBService::NewStub(channel)) {}
 
     int rpc_read(uint32_t key, string &value, bool isCachingEnabled, 
-                 string & clientIdentifier, int currentServerIdx) {
+                 string & clientIdentifier, const string &serverAddress) {
         if (debugMode <= DebugLevel::LevelInfo) {
-            printf("%s : Key = %d\n", __func__, key);
+            cout << __func__ << " for server address " << serverAddress << " Key = " << key << endl;
         }
 
         ReadResult rres;
@@ -72,9 +72,9 @@ class DistributedRocksDBClient {
                          << endl;
                 }
                 if (debugMode <= DebugLevel::LevelError) {
-                    cout << __func__ << "\t : Retrying to " 
-                         << currentServerIdx << " with timeout (ms) of "
-                         << currentBackoff << " MULTIPLIER = " << MULTIPLIER << endl;
+                    cout << __func__ << "\t : Retrying to server "
+                        << serverAddress << " with timeout (ms) of " 
+                        << currentBackoff << " MULTIPLIER = " << MULTIPLIER << endl;
                 }
             }
         }
@@ -100,9 +100,9 @@ class DistributedRocksDBClient {
     }
 
     int rpc_write(uint32_t key, const string &value,
-         string & clientIdentifier, int currentServerIdx) {
+         string & clientIdentifier, const string &serverAddress) {
         if (debugMode <= DebugLevel::LevelInfo) {
-            printf("%s : Key = %d\n", __func__, key);
+            cout << __func__ << " for server address " << serverAddress << " Key = " << key << endl;
         }
 
         WriteResult wres;
@@ -141,8 +141,8 @@ class DistributedRocksDBClient {
                          << endl;
                 }
                 if (debugMode <= DebugLevel::LevelError) {
-                    cout << __func__ << "\t : Retrying to " 
-                         << currentServerIdx << " with timeout (ms) of "
+                    cout << __func__ << "\t : Retrying to "
+                         << serverAddress << " with timeout (ms) of "
                          << currentBackoff << endl;
                 }
             }
@@ -244,7 +244,7 @@ struct ServerInfo {
     }
 };
 
-void cacheInvalidationListener(vector<ServerInfo*> & serverInfos, int & currentServerIdx,
+void cacheInvalidationListener(ServerInfo* serverToContact,
     bool isCachingEnabled, string clientIdentifier, unordered_map<int, CacheInfo> & cacheMap);
 
 bool CacheInfo::isStale() {
@@ -266,45 +266,184 @@ class Client {
 public:
     string clientIdentifier;
     std::thread notificationThread;
-    int currentServerIdx, clientThreadId;
-    vector<ServerInfo*> serverInfos;
+    int clientThreadId;
+    unordered_map<string, ServerInfo*> serverInfos;
+    string primaryAddress;
+    unordered_set<string> backupAddresses;
+    std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_;
+    mutex systemStateLock;
+
     unordered_map<int, CacheInfo> cacheMap;
     bool readFromBackup, isCachingEnabled;
 
-    Client(vector<string> &serverAddresses, bool cachingEnabled, 
-            int threadId, bool isReadFromBackup = false) 
-        : clientThreadId(threadId) {
+    Client(string coordinatorAddress, bool cachingEnabled, int threadId, 
+                bool isReadFromBackup = false) 
+        : clientThreadId(threadId),
+          coordinator_stub_(DistributedRocksDBService::NewStub(grpc::CreateChannel(
+                coordinatorAddress.c_str(), grpc::InsecureChannelCredentials()))) {
         isCachingEnabled = cachingEnabled;
         readFromBackup = isReadFromBackup;
-        currentServerIdx = 0;
+        coordinatorAddress = coordinatorAddress;
         clientIdentifier = generateClientIdentifier();
-        initServerInfo(serverAddresses);
-        if (debugMode <= DebugLevel::LevelInfo) {
-            printf("%s \t: Connecting to server at %s...\n", __func__,
-            serverInfos[currentServerIdx]->address.c_str());
-        }
+
+        getSystemState();
+
         cout << __func__ << "\t : Client tid = " << clientThreadId 
              << " created with id = " <<  clientIdentifier << endl;
     }
 
     int run_application(int NUM_RUNS);
-    int client_read(uint32_t key, string &value);
-    int client_write(uint32_t key, const string &value);
+    int client_read(uint32_t key, string &value, Consistency consistency);
+    int client_write(uint32_t key, const string &value, Consistency consistency);
 
-    void initServerInfo(vector<string> addresses) {
-        for (string address : addresses) {
-            serverInfos.push_back(new ServerInfo(address));
+    string selectBackupServerForRead(){
+        lock_guard<mutex> guard(systemStateLock);
+        int size = backupAddresses.size();
+        std::random_device dev;
+        std::mt19937 rng(dev());
+        std::uniform_int_distribution<std::mt19937::result_type> dist6(0, size-1);
+        return *(std::next(std::begin(backupAddresses), (int)dist6(rng)));
+    }
+
+    ServerInfo* getServerToContact(Consistency consistency, bool isWriteRequest){        
+        if(!isWriteRequest && consistency == Consistency::eventual && !backupAddresses.empty()){
+            string backupAddress = selectBackupServerForRead();
+            return serverInfos[backupAddress];          
         }
-        notificationThread = (std::thread(cacheInvalidationListener, std::ref(serverInfos),
-            std::ref(currentServerIdx), isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
+        systemStateLock.lock();
+        const string primary(primaryAddress);
+        systemStateLock.unlock();
+
+        if(serverInfos.find(primary) == serverInfos.end()){
+                cout << "ERR: No server info for primary address " << primary << endl;
+                exit(1);
+        }
+        return serverInfos[primary];
+    }
+
+    void initServerInfo(vector<string> newAddresses) {
+        for (string address : newAddresses) {
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << "Creating connection for Adress: " << address << endl;
+            }
+            serverInfos[address] = new ServerInfo(address);
+        }
+        const string primary(primaryAddress);
+
+        notificationThread = (std::thread(cacheInvalidationListener, (serverInfos[primary]),
+            isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
         msleep(1);
     }
 
+
+    void updateSystemState(const SystemState &systemStateMsg){
+        lock_guard<mutex> guard(systemStateLock);
+        
+        if(systemStateMsg.primary().empty() && primaryAddress.empty()){
+            cout << __func__ << ": Error: No Primary server is running " << endl;
+            exit(1);
+        }
+        
+        // newAddresses the addresses whose gRPC connection is not created
+        vector<string> newAddresses;  
+
+        if(serverInfos.find(systemStateMsg.primary()) == serverInfos.end()){
+            newAddresses.push_back(systemStateMsg.primary());
+        }
+        
+        primaryAddress = systemStateMsg.primary();
+
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout<< __func__ << " Primary Address: " << primaryAddress << endl;
+        }
+
+        unordered_set<string> receivedBackupSet;
+
+        // Add only the addresses seen for first time
+        for (auto address : systemStateMsg.backups()) {
+            if(backupAddresses.find(address) == backupAddresses.end()){
+                backupAddresses.insert(address);
+                newAddresses.push_back(address);
+            }
+            receivedBackupSet.insert(address);
+        }
+
+        // remove the addresses & connection that are not sent by coordinator
+        for(auto address : backupAddresses){
+            if(receivedBackupSet.find(address) == receivedBackupSet.end()){
+                backupAddresses.erase(address);
+            }
+            if(serverInfos.find(address) == serverInfos.end()){
+                serverInfos.erase(address);
+            }
+        }
+        
+        initServerInfo(newAddresses);
+    }
+
+    int getSystemState(){
+        bool isDone = false;
+        int numRetriesLeft = MAX_NUM_RETRIES;
+        unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+        int error_code = 0;
+        ClientContext clientContext;
+        SystemStateRequest systemStateRequest;
+        SystemState systemStateReply;
+
+        while (!isDone) {
+            
+            systemStateRequest.set_request(clientIdentifier);
+            
+            // Set timeout for API
+            std::chrono::system_clock::time_point deadline =
+                std::chrono::system_clock::now() +
+                std::chrono::milliseconds(currentBackoff);
+
+            clientContext.set_wait_for_ready(true);
+            clientContext.set_deadline(deadline);
+
+            Status status = coordinator_stub_->rpc_getSystemState(&clientContext, systemStateRequest, &systemStateReply);
+            // TODO add error code in SystemStateReply for coordinator
+            error_code = status.error_code();
+            currentBackoff *= MULTIPLIER;
+
+            if (status.error_code() == grpc::StatusCode::OK ||
+                numRetriesLeft-- == 0) {
+                isDone = true;
+            } else {
+                if (debugMode <= DebugLevel::LevelInfo) {
+                    printf("%s \t : Timed out to contact coordinator server.\n", __func__);
+                    cout << __func__
+                         << "\t : Error code = " << status.error_message()
+                         << endl;
+                }
+                if (debugMode <= DebugLevel::LevelError) {
+                    cout << __func__ << "\t : Retrying to coordinator"
+                         << currentBackoff << " MULTIPLIER = " << MULTIPLIER << endl;
+                }
+            }
+        }
+
+        // case where server is not responding/offline
+        if (error_code != grpc::StatusCode::OK) {
+            if (debugMode <= DebugLevel::LevelError) {
+                cout << __func__ << "\t : Failed because of timeout!" << endl;
+                cout << __func__ << "Coordinator server seems offline/not responding" << endl;
+            }
+            return SERVER_OFFLINE_ERROR_CODE;
+        }
+
+        updateSystemState(systemStateReply);
+        return 0;
+    }
+
     ~Client() {
-        (serverInfos[currentServerIdx]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
+
+        if(serverInfos.find(primaryAddress) != serverInfos.end())
+            (serverInfos[primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
         notificationThread.join();
-        for (int i = 0; i < serverInfos.size(); i++) {
-            delete serverInfos[i];
+        for (auto iter = serverInfos.begin(); iter != serverInfos.end(); ++iter) {
+            delete iter->second;
         }
     }
 };
