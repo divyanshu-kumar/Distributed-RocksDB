@@ -165,50 +165,66 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         unordered_set<string> currentBackups(backups);
         systemStateLock.unlock();
 
-        // TODO : Just modified sequentially for now. 
-        // Issue "Replicate Writes #12" to fix this for parallel execution.
-        for (auto backupAddress : currentBackups) {
-            WriteResult wres;
-            bool isDone = false;
-            int numRetriesLeft = MAX_NUM_RETRIES;
-            unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+        vector<thread> threads;
+        for (auto backupAddress : currentBackups)
+        {
+            threads.push_back(thread(&ServerReplication::sendWritesToBackups, this, backupAddress, key, value));
+        }        
 
-            while (!isDone) {
-                ClientContext ctx;
-                WriteRequest wreq;
-                wreq.set_key(key);
-                wreq.set_value(value);
-
-                std::chrono::system_clock::time_point deadline =
-                    std::chrono::system_clock::now() +
-                    std::chrono::milliseconds(currentBackoff);
-
-                ctx.set_wait_for_ready(true);
-                ctx.set_deadline(deadline);
-
-                Status status = stubs[backupAddress]->rpc_write(&ctx, wreq, &wres);
-                currentBackoff *= MULTIPLIER;
-                if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED ||
-                    numRetriesLeft-- == 0) {
-                    if (numRetriesLeft <= 0) {
-                        if (debugMode <= DebugLevel::LevelError) {
-                            printf("%s \t : Backup server seems offline\n", __func__);
-                        }
-                        return -1;
-                    }
-                    isDone = true;
-                } else {
-                    // printf("%s \t : Timed out to contact server. Retrying...\n",
-                    // __func__);
-                }
-            }
-
-            if (wres.err() != 0) { // TODO : maybe continue sending to others on one backup's failure
-                return wres.err();
-            }
+        for (int i=0;i<threads.size();i++) 
+        {
+            threads[i].join();
         }
 
         return 0;
+    }
+
+    void sendWritesToBackups(string backupAddress, uint32_t key, const string &value)
+    {
+        cout << __func__ << " Key: " << key << " Value: " << value << " Backup Address: " << backupAddress;
+        WriteResult wres;
+        bool isDone = false;
+        int numRetriesLeft = MAX_NUM_RETRIES;
+        unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+
+        while (!isDone)
+        {
+            ClientContext ctx;
+            WriteRequest wreq;
+            wreq.set_key(key);
+            wreq.set_value(value);
+
+            std::chrono::system_clock::time_point deadline =
+                std::chrono::system_clock::now() +
+                std::chrono::milliseconds(currentBackoff);
+
+            ctx.set_wait_for_ready(true);
+            ctx.set_deadline(deadline);
+
+            Status status = stubs[backupAddress]->rpc_write(&ctx, wreq, &wres);
+            currentBackoff *= MULTIPLIER;
+            if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED ||
+                numRetriesLeft-- == 0)
+            {
+                if (numRetriesLeft <= 0)
+                {
+                    if (debugMode <= DebugLevel::LevelError)
+                    {
+                        printf("%s \t : Backup server seems offline\n", __func__);
+                    }
+                }
+                isDone = true;
+            }
+            else
+            {
+                // printf("%s \t : Timed out to contact server. Retrying...\n",
+                // __func__);
+            }
+        }
+
+        if (wres.err() != 0)
+        { 
+        }     
     }
 
     Status rpc_read(ServerContext* context, const ReadRequest* rr,
