@@ -49,6 +49,13 @@ int msleep(long msec) {
     return res;
 }
 
+string getConsistencyString(Consistency consistency){
+    if(consistency == Consistency::strong)
+        return "strong";
+    else
+        return "eventual";
+}
+
 bool isRoleValid(const string &role) {
     return role == "primary" || role == "backup";
 }
