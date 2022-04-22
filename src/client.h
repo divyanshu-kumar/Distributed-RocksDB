@@ -32,7 +32,9 @@ class DistributedRocksDBClient {
     int rpc_read(uint32_t key, string &value, bool isCachingEnabled, 
                  string & clientIdentifier, const string &serverAddress, Consistency consistency) {
         if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << " for server address " << serverAddress << " Key = " << key << endl;
+            cout << __func__ << " for server address: " << serverAddress 
+                 << " Key: " << key << " Consistency: " 
+                 << getConsistencyString(consistency) << endl;
         }
 
         ReadResult rres;
@@ -103,7 +105,9 @@ class DistributedRocksDBClient {
     int rpc_write(uint32_t key, const string &value,
          string & clientIdentifier, const string &serverAddress, Consistency consistency) {
         if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << " for server address " << serverAddress << " Key = " << key << endl;
+            cout << __func__ << " for server address " << serverAddress 
+                 << " Key: " << key << " Consistency: " 
+                 << getConsistencyString(consistency) << endl;
         }
 
         WriteResult wres;
@@ -310,6 +314,11 @@ public:
     ServerInfo* getServerToContact(Consistency consistency, bool isWriteRequest){        
         if(!isWriteRequest && consistency == Consistency::eventual && !backupAddresses.empty()){
             string backupAddress = selectBackupServerForRead();
+            cout << "selecting server "<< backupAddress << endl;
+            if(serverInfos.find(backupAddress) == serverInfos.end()){
+                cout << __func__ << " could not find " << backupAddress <<" gRPC connection" << endl;
+                std::quick_exit( EXIT_SUCCESS );
+            }
             return serverInfos[backupAddress];          
         }
         systemStateLock.lock();
@@ -318,22 +327,25 @@ public:
 
         if(serverInfos.find(primary) == serverInfos.end()){
                 cout << "ERR: No server info for primary address " << primary << endl;
-                exit(1);
+                std::quick_exit( EXIT_SUCCESS );
         }
+        cout << "selecting server "<< primary << endl;
         return serverInfos[primary];
     }
 
     void initServerInfo(vector<string> newAddresses) {
         for (string address : newAddresses) {
             if (debugMode <= DebugLevel::LevelInfo) {
-                cout << "Creating connection for Adress: " << address << endl;
+                cout << __func__ << "\t : create gRPC Connection for " << address << endl; 
             }
-            serverInfos[address] = new ServerInfo(address);
+            if(serverInfos.find(address) != serverInfos.end()){
+                cout << __func__ << " serverInfos already has the connection" << endl;
+            } else
+                serverInfos[address] = new ServerInfo(address);
         }
-        const string primary(primaryAddress);
-
-        notificationThread = (std::thread(cacheInvalidationListener, (serverInfos[primary]),
-            isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
+        // TODO: Cache notification thread is crashing. Currently disabled temporarily
+        // notificationThread = (std::thread(cacheInvalidationListener, (serverInfos[primary]),
+        //     isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
         msleep(1);
     }
 
@@ -341,42 +353,57 @@ public:
     void updateSystemState(const SystemState &systemStateMsg){
         lock_guard<mutex> guard(systemStateLock);
         
-        if(systemStateMsg.primary().empty() && primaryAddress.empty()){
-            cout << __func__ << ": Error: No Primary server is running " << endl;
-            exit(1);
+        if(systemStateMsg.primary().empty()){
+            cout << __func__ << "\t : No primary server received from Coordinator " 
+                   " Exiting.... " << endl;
+            std::quick_exit( EXIT_SUCCESS );
         }
         
-        // newAddresses the addresses whose gRPC connection is not created
+        // newAddresses stores the addresses whose gRPC connection is to be created
         vector<string> newAddresses;  
+        unordered_set<string> receivedBackupAddresses;
 
-        if(serverInfos.find(systemStateMsg.primary()) == serverInfos.end()){
-            newAddresses.push_back(systemStateMsg.primary());
-        }
-        
-        primaryAddress = systemStateMsg.primary();
-
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout<< __func__ << " Primary Address: " << primaryAddress << endl;
-        }
-
-        unordered_set<string> receivedBackupSet;
-
-        // Add only the addresses seen for first time
+        // Add only the addresses seen for first time in backups
         for (auto address : systemStateMsg.backups()) {
             if(backupAddresses.find(address) == backupAddresses.end()){
+                if (debugMode <= DebugLevel::LevelInfo) {
+                    cout << __func__ << "\t : adding new Backup Address " << address << endl;
+                }
                 backupAddresses.insert(address);
                 newAddresses.push_back(address);
             }
-            receivedBackupSet.insert(address);
+            receivedBackupAddresses.insert(address);
+        }
+        unordered_set<string> tempSet(backupAddresses);
+        // remove the addresses & connection that are not sent by coordinator
+        for(auto address : tempSet){
+            if(receivedBackupAddresses.find(address) == receivedBackupAddresses.end()){
+                
+                if(!primaryAddress.empty() && address == systemStateMsg.primary()){
+                    if (debugMode <= DebugLevel::LevelInfo) {
+                        cout << __func__ << "\t : removing Address in backups " << address << endl;
+                    }
+                    backupAddresses.erase(address);
+                } else {
+                    if (debugMode <= DebugLevel::LevelInfo) {
+                        cout << __func__ << "\t : removing from backups & removing gRPC connection address: " << address << endl;
+                    }
+                    backupAddresses.erase(address);
+                    serverInfos.erase(address);
+                }
+            }
         }
 
-        // remove the addresses & connection that are not sent by coordinator
-        for(auto address : backupAddresses){
-            if(receivedBackupSet.find(address) == receivedBackupSet.end()){
-                backupAddresses.erase(address);
-            }
-            if(serverInfos.find(address) == serverInfos.end()){
-                serverInfos.erase(address);
+        primaryAddress = systemStateMsg.primary();
+
+         if(serverInfos.find(primaryAddress) == serverInfos.end()){
+            newAddresses.push_back(primaryAddress);
+        }
+
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Updated Primary Address as " << primaryAddress << endl;
+            for(auto address : backupAddresses){
+                cout << __func__ << "\t : Backup contains " << address << endl;
             }
         }
         
@@ -384,6 +411,9 @@ public:
     }
 
     int getSystemState(){
+        if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Contacting Coordinator: " << endl;
+        }
         bool isDone = false;
         int numRetriesLeft = MAX_NUM_RETRIES;
         unsigned int currentBackoff = INITIAL_BACKOFF_MS;
@@ -440,10 +470,10 @@ public:
     }
 
     ~Client() {
-
-        if(serverInfos.find(primaryAddress) != serverInfos.end())
-            (serverInfos[primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
-        notificationThread.join();
+        // TODO: currently notification thread is disabled, as its crashing. Check this
+        // if(serverInfos.find(primaryAddress) != serverInfos.end())
+        //     (serverInfos[primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
+        //notificationThread.join();
         for (auto iter = serverInfos.begin(); iter != serverInfos.end(); ++iter) {
             delete iter->second;
         }
