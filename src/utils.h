@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <ctime>
 #include <memory>
+#include <queue>
 #include <sstream>
 #include <signal.h>
 #include <unordered_set>

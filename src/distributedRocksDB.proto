@@ -15,12 +15,14 @@ message ReadRequest{
     uint32 key = 1;
     bool requirecache = 2;
     string clientidentifier = 3;
+    string consistency = 4;
 }
 
 message WriteRequest{
     uint32 key = 1;
     bytes value = 2;
     string clientidentifier = 3;
+    string consistency = 4;
 }
 
 message WriteResult{

@@ -11,8 +11,8 @@ using namespace DistributedRocksDB;
 using namespace std;
 
 const int MAX_NUM_RETRIES = 5;
-const int INITIAL_BACKOFF_MS = 200;
-const int MULTIPLIER = 2;
+const int INITIAL_BACKOFF_MS = 1000;
+const int MULTIPLIER = 1.2;
 
 struct CacheInfo {
     bool isCached;
