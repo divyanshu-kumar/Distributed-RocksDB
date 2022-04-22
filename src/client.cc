@@ -27,7 +27,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
 
     int res = (serverToContact->connection)
                   ->rpc_read(key, value, isCachingEnabled, 
-                  clientIdentifier, serverToContact->address);
+                  clientIdentifier, serverToContact->address, consistency);
 
     if (res == SERVER_OFFLINE_ERROR_CODE) {
         if (debugMode <= DebugLevel::LevelError) {
@@ -37,7 +37,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
                 << endl;
         }
         res = (serverToContact->connection)->rpc_read(key, value, isCachingEnabled, 
-                clientIdentifier, serverToContact->address);
+                clientIdentifier, serverToContact->address, consistency);
         if (res < 0) {
             if (debugMode <= DebugLevel::LevelError) {
                 cout << __func__ << "\t : Both servers are offline!" << endl;
@@ -56,7 +56,7 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
 
     ServerInfo* serverToContact = getServerToContact(consistency, true);
 
-    int res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address);
+    int res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency);
 
     if (res == SERVER_OFFLINE_ERROR_CODE) {
         if (debugMode <= DebugLevel::LevelError) {
@@ -65,8 +65,8 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
                     "server now."
                 << endl;
         }
-
-        res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address);
+        // TODO: in case of error, update the state from backup
+        res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency);
 
         if (res < 0) {
             if (debugMode <= DebugLevel::LevelError) {

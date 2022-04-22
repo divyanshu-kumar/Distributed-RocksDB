@@ -30,7 +30,7 @@ class DistributedRocksDBClient {
         : stub_(DistributedRocksDBService::NewStub(channel)) {}
 
     int rpc_read(uint32_t key, string &value, bool isCachingEnabled, 
-                 string & clientIdentifier, const string &serverAddress) {
+                 string & clientIdentifier, const string &serverAddress, Consistency consistency) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << " for server address " << serverAddress << " Key = " << key << endl;
         }
@@ -47,6 +47,7 @@ class DistributedRocksDBClient {
             ReadRequest rr;
             rr.set_key(key);
             rr.set_requirecache(isCachingEnabled);
+            rr.set_consistency(getConsistencyString(consistency));
             rr.set_clientidentifier(clientIdentifier);
 
             // Set timeout for API
@@ -100,7 +101,7 @@ class DistributedRocksDBClient {
     }
 
     int rpc_write(uint32_t key, const string &value,
-         string & clientIdentifier, const string &serverAddress) {
+         string & clientIdentifier, const string &serverAddress, Consistency consistency) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << " for server address " << serverAddress << " Key = " << key << endl;
         }
@@ -117,6 +118,7 @@ class DistributedRocksDBClient {
             WriteRequest wreq;
             wreq.set_key(key);
             wreq.set_value(value);
+            wreq.set_consistency(getConsistencyString(consistency));
             wreq.set_clientidentifier(clientIdentifier);
 
             std::chrono::system_clock::time_point deadline =
