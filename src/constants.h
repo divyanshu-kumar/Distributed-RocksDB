@@ -12,3 +12,8 @@ const int stalenessLimit = 10 * 1e3; // milli-seconds
 const int SERVER_OFFLINE_ERROR_CODE = -1011317;
 
 const int backReadStalenessLimit = 10;
+
+enum Consistency {
+    strong = 1,
+    eventual = 2,
+};

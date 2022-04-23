@@ -30,6 +30,7 @@ DB* db;
 const int MAX_NUM_RETRIES = 5;
 const int INITIAL_BACKOFF_MS = 100;
 const int MULTIPLIER = 2;
+const int NUM_WORKER_THREADS = 100;
 
 string currentWorkDir, dataDirPath, writeTxLogsDirPath;
 
@@ -39,29 +40,19 @@ static unordered_map<int, std::mutex> blockLock;
 unordered_map<int, struct timespec> backupLastWriteTime;
 
 bool crashTestingEnabled(false);
+bool writeThreadPoolEnabled(false);
 
-void    rollbackUncommittedWrites();
-int     logWriteTransaction(int address);
-int     unLogWriteTransaction(int address);
+struct timespec* max_time(struct timespec* t1, struct timespec* t2);
 
-struct timespec* max_time(struct timespec *t1, struct timespec *t2);
+struct WriteInfo {
+    int key;
+    string value;
+    string address;
+    std::atomic<int>& countSent;
 
-struct BackupOutOfSync {
-    mutex m_lock;
-    unordered_set<int> outOfSyncBlocks;
-
-    BackupOutOfSync() {}
-
-    void logOutOfSync(const int address);
-
-    int sync();
-
-    bool isOutOfSync() {
-        lock_guard<mutex> guard(m_lock);
-        return !outOfSyncBlocks.empty();
-    }
-} backupSyncState;
-
+    WriteInfo(int k, string val, string addr, std::atomic<int>& count)
+        : key(k), value(val), address(addr), countSent(count) {}
+};
 struct NotificationInfo {
     unordered_map<string, bool> subscriberShouldRun;
     unordered_map<int, unordered_set<string>> subscribedClients;
@@ -151,64 +142,77 @@ static NotificationInfo notificationManager;
 
 class ServerReplication final : public DistributedRocksDBService::Service {
    public:
-
     ReadCache readCache;
 
-    ServerReplication() { }
+    ServerReplication() : threadPool(NUM_WORKER_THREADS) {}
 
     int rpc_write(uint32_t key, const string& value) {
         if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Key " << key << ", role " << role << endl;
+            cout << __func__ << "\t : Key " << key << endl;
         }
 
         systemStateLock.lock();
         unordered_set<string> currentBackups(backups);
         systemStateLock.unlock();
 
-        // TODO : Just modified sequentially for now. 
-        // Issue "Replicate Writes #12" to fix this for parallel execution.
+        vector<thread> threads;
         for (auto backupAddress : currentBackups) {
-            WriteResult wres;
-            bool isDone = false;
-            int numRetriesLeft = MAX_NUM_RETRIES;
-            unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+            threads.push_back(thread(&ServerReplication::sendWritesToBackups,
+                                     this, backupAddress, key, value));
+        }
 
-            while (!isDone) {
-                ClientContext ctx;
-                WriteRequest wreq;
-                wreq.set_key(key);
-                wreq.set_value(value);
-
-                std::chrono::system_clock::time_point deadline =
-                    std::chrono::system_clock::now() +
-                    std::chrono::milliseconds(currentBackoff);
-
-                ctx.set_wait_for_ready(true);
-                ctx.set_deadline(deadline);
-
-                Status status = stubs[backupAddress]->rpc_write(&ctx, wreq, &wres);
-                currentBackoff *= MULTIPLIER;
-                if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED ||
-                    numRetriesLeft-- == 0) {
-                    if (numRetriesLeft <= 0) {
-                        if (debugMode <= DebugLevel::LevelError) {
-                            printf("%s \t : Backup server seems offline\n", __func__);
-                        }
-                        return -1;
-                    }
-                    isDone = true;
-                } else {
-                    // printf("%s \t : Timed out to contact server. Retrying...\n",
-                    // __func__);
-                }
-            }
-
-            if (wres.err() != 0) { // TODO : maybe continue sending to others on one backup's failure
-                return wres.err();
-            }
+        for (int i = 0; i < threads.size(); i++) {
+            threads[i].join();
         }
 
         return 0;
+    }
+
+    void sendWritesToBackups(string backupAddress, uint32_t key,
+                             const string& value) {
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << " Key: " << key << " Value: " << value
+                 << " Backup Address: " << backupAddress << endl;
+        }
+
+        WriteResult wres;
+        bool isDone = false;
+        int numRetriesLeft = MAX_NUM_RETRIES;
+        unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+
+        while (!isDone) {
+            ClientContext ctx;
+            WriteRequest wreq;
+            wreq.set_key(key);
+            wreq.set_value(value);
+
+            std::chrono::system_clock::time_point deadline =
+                std::chrono::system_clock::now() +
+                std::chrono::milliseconds(currentBackoff);
+
+            ctx.set_wait_for_ready(true);
+            ctx.set_deadline(deadline);
+
+            Status status = stubs[backupAddress]->rpc_write(&ctx, wreq, &wres);
+            currentBackoff *= MULTIPLIER;
+            if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED ||
+                numRetriesLeft-- == 0) {
+                if (numRetriesLeft <= 0) {
+                    if (debugMode <= DebugLevel::LevelError) {
+                        printf("%s \t : Backup server seems offline\n",
+                               __func__);
+                    }
+                }
+                isDone = true;
+            }
+        }
+
+        if (wres.err() != 0) {
+            if (debugMode <= DebugLevel::LevelInfo) {
+                printf("%s \t : Error code in result is not success\n",
+                        __func__);
+            }
+        }
     }
 
     Status rpc_read(ServerContext* context, const ReadRequest* rr,
@@ -218,10 +222,13 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         systemStateLock.unlock();
 
         if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Key " << rr->key() << ", role " << currentRole << endl;
+            cout << __func__ << "\t : Key " << rr->key() << ", role "
+                 << currentRole << endl;
         }
 
-        if (true || currentRole == "primary") { // TODO - Decide if want to lock only for primary 
+        if (true ||
+            currentRole ==
+                "primary") {  // TODO - Decide if want to lock only for primary
             blockLock[rr->key()].lock();
         }
 
@@ -236,13 +243,16 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         string buf;
         int res = 0;
 
-        ROCKSDB_NAMESPACE::Status status = db->Get(ReadOptions(), to_string(rr->key()), &buf);
+        ROCKSDB_NAMESPACE::Status status =
+            db->Get(ReadOptions(), to_string(rr->key()), &buf);
         assert(status.ok() || status.IsNotFound());
 
         reply->set_value(buf);
         reply->set_err(0);
 
-        if (true || currentRole == "primary") { // TODO - Decide if want to lock only for primary 
+        if (true ||
+            currentRole ==
+                "primary") {  // TODO - Decide if want to lock only for primary
             blockLock[rr->key()].unlock();
         }
 
@@ -256,13 +266,13 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         systemStateLock.unlock();
 
         if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Key " << wr->key() << ", role " << currentRole 
-                 << endl;
+            cout << __func__ << "\t : Key " << wr->key() << ", role "
+                 << currentRole << endl;
         }
 
         lock_guard<mutex> guard(blockLock[wr->key()]);
 
-        if (false && currentRole == "primary") { // TODO
+        if (false && currentRole == "primary") {  // TODO
             if (crashTestingEnabled) {
                 if (wr->key() == 5) {
                     raise(SIGSEGV);
@@ -271,13 +281,12 @@ class ServerReplication final : public DistributedRocksDBService::Service {
             notificationManager.Notify(wr->key(), wr->clientidentifier());
         }
 
-        int res = logWriteTransaction(wr->key());
-
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : About to write Key " << wr->key() << endl;
         }
 
-        ROCKSDB_NAMESPACE::Status status = db->Put(WriteOptions(), to_string(wr->key()), wr->value());
+        ROCKSDB_NAMESPACE::Status status =
+            db->Put(WriteOptions(), to_string(wr->key()), wr->value());
         assert(status.ok());
 
         if (debugMode <= DebugLevel::LevelInfo) {
@@ -285,21 +294,35 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
 
         reply->set_err(0);
-        
-        if (currentRole == "primary") {
-            int result = this->rpc_write(wr->key(), wr->value());
-            if (result != 0) {
-                // backupSyncState.logOutOfSync(wr->key());
-                printf("%s \t : Error : Failed to write to backups",
-                __func__);
-            }
-        }
 
-        res = unLogWriteTransaction(wr->key());
-        
-        if (res == -1) {
-            printf("%s \t : Error : Failed to unlog the write the transaction.",
-                   __func__);
+        if (currentRole == "primary") {
+            // Parallel writes to thread pool if feature is enabled
+            if (writeThreadPoolEnabled) {
+                std::atomic<int> replicateCount = 0;
+                std::unique_lock<std::mutex> lock(writeQMutex);
+
+                systemStateLock.lock();
+                unordered_set<string> currentBackups(backups);
+                systemStateLock.unlock();
+
+                for (auto& backupAddress : currentBackups) {
+                    writeQueue.push(WriteInfo(wr->key(), wr->value(),
+                                              backupAddress, replicateCount));
+                    work.notify_one();
+                }
+
+                workDone.wait(lock, [&] {
+                    return replicateCount == currentBackups.size();
+                });
+            }
+            // Parallel writes to new threads created on demand
+            else {
+                int result = this->rpc_write(wr->key(), wr->value());
+                if (result != 0) {
+                    printf("%s \t : Error : Failed to write to backups",
+                           __func__);
+                }
+            }
         }
 
         return Status::OK;
@@ -341,8 +364,8 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     }
 
     Status rpc_heartbeat(ServerContext* context,
-                        ServerReader<SystemState>* reader,
-                        Heartbeat* response) override {
+                         ServerReader<SystemState>* reader,
+                         Heartbeat* response) override {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << endl;
         }
@@ -358,11 +381,27 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         return Status::OK;
     }
 
+    void initiateThreadPool() {
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Intiating " << threadPool.size()
+                 << " threads" << endl;
+        }
+
+        for (int i = 0; i < threadPool.size(); i++) {
+            threadPool[i] = new std::thread{[&] { this->replicatorThread(); }};
+        }
+    }
+
    private:
     mutex systemStateLock;
     string primaryAddress;
     unordered_set<string> backups;
-    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>> stubs;
+    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>>
+        stubs;
+    vector<std::thread*> threadPool;
+    std::queue<WriteInfo> writeQueue;
+    std::mutex writeQMutex;
+    std::condition_variable work, workDone;
 
     void updateSystemView(SystemState systemStateMsg) {
         lock_guard<mutex> guard(systemStateLock);
@@ -370,35 +409,80 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         primaryAddress = systemStateMsg.primary();
 
         if (primaryAddress == my_address) {
+            if (role != "primary") {
+                if (debugMode <= DebugLevel::LevelInfo) {
+                    cout << __func__ << "\t : Role changed to primary." << endl;
+                }
+                if (writeThreadPoolEnabled) {
+                    initiateThreadPool();
+                }
+            }
             role = "primary";
-        }
-        else {
+        } else {
             role = "backup";
             return;
         }
 
         unordered_set<string> newBackups;
-        
+
         for (auto backupAddress : systemStateMsg.backups()) {
             newBackups.insert(backupAddress);
             if (backups.find(backupAddress) == backups.end()) {
-                cout << __func__ << 
-                    "\t : Adding node " << backupAddress << endl;
+                if (debugMode <= DebugLevel::LevelInfo) {
+                    cout << __func__ << "\t : Adding node " << backupAddress
+                         << endl;
+                }
                 std::shared_ptr<Channel> channel = grpc::CreateChannel(
                     backupAddress.c_str(), grpc::InsecureChannelCredentials());
-                stubs[backupAddress] = DistributedRocksDBService::NewStub(channel);
+                stubs[backupAddress] =
+                    DistributedRocksDBService::NewStub(channel);
             }
         }
 
         for (auto backup : backups) {
             if (newBackups.find(backup) == newBackups.end()) {
-                cout << __func__ << 
-                    "\t : Removing node " << backup << endl;
+                if (debugMode <= DebugLevel::LevelInfo) {
+                    cout << __func__ << "\t : Removing node " << backup << endl;
+                }
                 stubs.erase(backup);
             }
         }
 
         swap(newBackups, backups);
+    }
+
+    void replicatorThread() {
+        while (true) {
+            int key;
+            string value;
+            string address;
+            atomic<int>* countSent;
+
+            {
+                std::unique_lock<std::mutex> lock(writeQMutex);
+
+                work.wait(lock, [&] { return !writeQueue.empty(); });
+
+                WriteInfo writeInfo(writeQueue.front());
+                writeQueue.pop();
+
+                key = writeInfo.key;
+                value = writeInfo.value;
+                address = writeInfo.address;
+                countSent = &(writeInfo.countSent);
+
+                if (debugMode <= DebugLevel::LevelInfo) {
+                    cout << __func__ << "\t : Key " << key
+                         << " dequeued for backup " << address << " by thread "
+                         << std::this_thread::get_id() << endl;
+                }
+            }
+
+            sendWritesToBackups(address, key, value);
+
+            workDone.notify_one();
+            ++(*countSent);
+        }
     }
 };
 
@@ -407,11 +491,13 @@ static ServerReplication* serverReplication;
 void registerServer() {
     msleep(100);
 
-    std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_(DistributedRocksDBService::NewStub(grpc::CreateChannel(
-                coordinator_address.c_str(), grpc::InsecureChannelCredentials())));
+    std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_(
+        DistributedRocksDBService::NewStub(grpc::CreateChannel(
+            coordinator_address.c_str(), grpc::InsecureChannelCredentials())));
 
     if (debugMode <= DebugLevel::LevelInfo) {
-        printf("%s : Attempting to register with coordinator = %s\n", __func__, coordinator_address.c_str());
+        printf("%s : Attempting to register with coordinator = %s\n", __func__,
+               coordinator_address.c_str());
     }
 
     RegisterResult registerResult;
@@ -425,7 +511,7 @@ void registerServer() {
         ClientContext ctx;
         RegisterRequest registerRequest;
         registerRequest.set_address(my_address);
-        
+
         std::chrono::system_clock::time_point deadline =
             std::chrono::system_clock::now() +
             std::chrono::milliseconds(currentBackoff);
@@ -433,7 +519,8 @@ void registerServer() {
         ctx.set_wait_for_ready(true);
         ctx.set_deadline(deadline);
 
-        Status status = coordinator_stub_->rpc_registerNewNode(&ctx, registerRequest, &registerResult);
+        Status status = coordinator_stub_->rpc_registerNewNode(
+            &ctx, registerRequest, &registerResult);
         error_code = status.error_code();
         currentBackoff *= MULTIPLIER;
 
@@ -442,15 +529,14 @@ void registerServer() {
             isDone = true;
         } else {
             if (debugMode <= DebugLevel::LevelInfo) {
-                printf("%s \t : Timed out to contact coordinator server.\n", __func__);
+                printf("%s \t : Timed out to contact coordinator server.\n",
+                       __func__);
                 cout << __func__
-                        << "\t : Error code = " << status.error_message()
-                        << endl;
+                     << "\t : Error code = " << status.error_message() << endl;
             }
             if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Retrying to " 
-                        << coordinator_address << " with timeout (ms) of "
-                        << currentBackoff << endl;
+                cout << __func__ << "\t : Retrying to " << coordinator_address
+                     << " with timeout (ms) of " << currentBackoff << endl;
             }
         }
     }
@@ -460,121 +546,22 @@ void registerServer() {
             cout << __func__ << "\t : Failed because of timeout!" << endl;
         }
         return;
-    }
-    else {
+    } else {
         string assignedResult = registerResult.result();
         if (assignedResult == "primary" || assignedResult == "backup") {
             role = assignedResult;
-            cout << __func__ << "\t : Role assigned as " << role << endl;
-        }
-        else {
-            cout << __func__ << "\t : Was not able to get an assigned role!" << endl;
+            if (role == "primary" && writeThreadPoolEnabled) {
+                serverReplication->initiateThreadPool();
+            }
+            if (debugMode <= DebugLevel::LevelError) {
+                cout << __func__ << "\t : Role assigned as " << role << endl;
+            }
+        } else {
+            cout << __func__ << "\t : Was not able to get an assigned role!"
+                 << endl;
             quick_exit(EXIT_SUCCESS);
         }
     }
 
     return;
-}
-
-void BackupOutOfSync::logOutOfSync(const int address) {
-    lock_guard<mutex> guard(m_lock);
-    if (debugMode <= DebugLevel::LevelInfo) {
-        cout << __func__ << "\t : Out of sync address = " << address << endl;
-    }
-    outOfSyncBlocks.insert(address);
-}
-
-int BackupOutOfSync::sync() {
-    lock_guard<mutex> guard(m_lock);
-    if (debugMode <= DebugLevel::LevelInfo) {
-        cout << __func__ << endl;
-    }
-    int res = 0;
-
-    for (auto key : outOfSyncBlocks) {
-        string buf;
-        ROCKSDB_NAMESPACE::Status status = db->Get(ReadOptions(), to_string(key), &buf);
-        cout << __func__ << "\t : Writing key " << key << " to backup server" << endl;
-        res = serverReplication->rpc_write(key, buf);
-        if (res < 0) {
-            if (debugMode <= DebugLevel::LevelInfo) {
-                cout << __func__
-                     << "\t : Failed to sync keys to backup server." << endl;
-            }
-            return -1;
-        }
-    }
-
-    outOfSyncBlocks.clear();
-
-    if (debugMode <= DebugLevel::LevelError) {
-        cout << __func__ << "\t : Successfully sync'd changed files!" << endl;
-    }
-
-    return 0;
-}
-
-int logWriteTransaction(int address) {
-    if (debugMode <= DebugLevel::LevelInfo) {
-        cout << __func__ << "\t : Address = " << address << endl;
-    }
-    return 0;
-    // string destPath = writeTxLogsDirPath + "/" + to_string(address);
-    // string sourcePath = dataDirPath + "/" + to_string(address);
-
-    // int res = copyFile(destPath, sourcePath);
-    // if (res == -1) {
-    //     if (debugMode <= DebugLevel::LevelError) {
-    //         printf("%s\t : Error: Dest Path = %s, Source Path = %s\n", __func__,
-    //                destPath.c_str(), sourcePath.c_str());
-    //     }
-    //     perror(strerror(errno));
-    // }
-
-    // return res;
-}
-
-int unLogWriteTransaction(int address) {
-    if (debugMode <= DebugLevel::LevelInfo) {
-        cout << __func__ << "\t : Address = " << address << endl;
-    }
-    return 0;
-    // string filePath = writeTxLogsDirPath + "/" + to_string(address);
-
-    // int res = unlink(filePath.c_str());
-    // if (res == -1) {
-    //     if (debugMode <= DebugLevel::LevelError) {
-    //         printf("%s\t : Error: File Path = %s\n", __func__,
-    //                filePath.c_str());
-    //     }
-    //     perror(strerror(errno));
-    // }
-
-    // return res;
-}
-
-void rollbackUncommittedWrites() {
-    DIR* dir = opendir(writeTxLogsDirPath.c_str());
-    if (dir == NULL) {
-        return;
-    }
-
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        string fileName(entry->d_name);
-        if (fileName == "." || fileName == "..") continue;
-        string sourcePath = writeTxLogsDirPath + "/" + fileName;
-        string destPath = dataDirPath + "/" + fileName;
-        string command = "mv " + sourcePath + " " + destPath;
-        int res = system(command.c_str());
-        if (res != 0) {
-            if (debugMode <= DebugLevel::LevelError) {
-                printf("%s : Error - failed to rename the file %s \n", __func__,
-                       sourcePath.c_str());
-            }
-            perror(strerror(errno));
-        }
-    }
-
-    closedir(dir);
 }

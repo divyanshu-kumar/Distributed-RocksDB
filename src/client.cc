@@ -12,105 +12,102 @@ void getRandomText(string &str, int size);
 vector<vector<pair<double, int>>> allReadTimes, allWriteTimes;
 void saveData(const vector<pair<double, int>> & v, const string & filename);
 
-int Client::client_read(const uint32_t key, string &value) {
+int Client::client_read(const uint32_t key, string &value, Consistency consistency) {
     if (debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << "\t : Key = " << key
              << ", ReadFromBackup = " << readFromBackup << endl;
     }
 
-    int serverToContactIdx =
-        readFromBackup ? (currentServerIdx + 1) % 2 : currentServerIdx;
-
-    if (debugMode <= DebugLevel::LevelInfo) {
-        cout << __func__ << "\t : Contacting server "
-             << serverInfos[serverToContactIdx]->address << endl;
-    }
-
-    int res = (serverInfos[serverToContactIdx]->connection)
-                  ->rpc_read(key, value, isCachingEnabled, 
-                  clientIdentifier, currentServerIdx);
-
-    if (res == SERVER_OFFLINE_ERROR_CODE) {
-        if (debugMode <= DebugLevel::LevelError) {
-            cout << __func__
-                << "\t : Read request timed-out, trying to contact other "
-                    "server now."
-                << endl;
+    int res = 0;
+    
+    do {
+        ServerInfo* serverToContact = getServerToContact(consistency, false);
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Contacting server "
+                 << serverToContact->address << endl;
         }
-        res = (serverInfos[currentServerIdx]->connection)
-                ->rpc_read(key, value, isCachingEnabled, 
-                clientIdentifier, currentServerIdx);
-        if (res < 0) {
+        res = (serverToContact->connection)->rpc_read(key, value, isCachingEnabled, 
+                  clientIdentifier, serverToContact->address, consistency);
+
+        if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Both servers are offline!" << endl;
+                cout << __func__
+                    << "\t : Write request timed-out, Connecting to coordinator and retrying"
+                    << endl;
             }
-            return -1;
+            getSystemState();
         }
+    } while(res == SERVER_OFFLINE_ERROR_CODE);
+    
+    if (res < 0) {
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : request did not succeed " << endl;
+        }
+        return -1;
     }
 
     return res;
 }
 
-int Client::client_write(const uint32_t key, const string &value) {
+int Client::client_write(const uint32_t key, const string &value, Consistency consistency) {
     if (debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << "\t : Key = " << key << endl;
     }
 
-    int res = (serverInfos[currentServerIdx]->connection)
-                  ->rpc_write(key, value, clientIdentifier, currentServerIdx);
+    int res = 0;
 
-    if (res == SERVER_OFFLINE_ERROR_CODE) {
-        if (debugMode <= DebugLevel::LevelError) {
-            cout << __func__
-                << "\t : Write request timed-out, trying to contact other "
-                    "server now."
-                << endl;
+    do {
+        ServerInfo* serverToContact = getServerToContact(consistency, true);
+        if (debugMode <= DebugLevel::LevelInfo) {
+             cout << __func__ << "\t : Contacting server "
+                 << serverToContact->address << endl;
         }
-
-        res = (serverInfos[currentServerIdx]->connection)
-                ->rpc_write(key, value, clientIdentifier, currentServerIdx);
-
-        if (res < 0) {
+        res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency);
+        if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Both servers are offline!" << endl;
+                cout << __func__
+                    << "\t : Write request timed-out, Connecting to coordinator and retrying"
+                    << endl;
             }
-            return -1;
+            getSystemState();
         }
+    } while(res == SERVER_OFFLINE_ERROR_CODE);
+    
+    if (res < 0) {
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : request did not succeed " << endl;
+        }
+        return -1;
     }
 
     return res;
 }
 
 void cacheInvalidationListener(
-    vector<ServerInfo*> & serverInfos, int & currentServerIdx,
+    ServerInfo* serverToContact,
     bool isCachingEnabled, string clientIdentifier, unordered_map<int, CacheInfo> & cacheMap) {
 
-    cout << __func__ << "\t : Listening for notifications.." << endl;
     Status status = grpc::Status::OK;
-    do {
-        status = (serverInfos[currentServerIdx]->connection)
-                     ->rpc_subscribeForNotifications(isCachingEnabled, clientIdentifier, cacheMap);
+    status = (serverToContact->connection)->rpc_subscribeForNotifications(isCachingEnabled, clientIdentifier, cacheMap);
+    if (debugMode <= DebugLevel::LevelInfo) {
+        cout << __func__ << "\t : Error code = " << status.error_code()
+                << " and message = " << status.error_message() << endl;
+    }
 
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Error code = " << status.error_code()
-                 << " and message = " << status.error_message() << endl;
-        }
-
-        if (status.error_code() == grpc::StatusCode::UNAVAILABLE) {
-
+    if (status.error_code() == grpc::StatusCode::UNAVAILABLE) {
+        if(isCachingEnabled){
             for (auto &cachedEntry : cacheMap) {
                 cachedEntry.second.invalidateCache();
             }
             if (debugMode <= DebugLevel::LevelNone) {
                 cout << __func__ << "\t : Invalidated all cached entries as changing server!" << endl;
             }
-            currentServerIdx = (currentServerIdx + 1) % serverInfos.size();
-            if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Changing to backup server "
-                     << serverInfos[currentServerIdx]->address << endl;
-            }
         }
-    } while (grpc::StatusCode::UNAVAILABLE == status.error_code());
+        // TODO: Check if there needs to be any change in serverInfo
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : Should change server  " << endl;
+        }
+    }
 
     cout << __func__ << "\t : Stopped listening for notifications now." << endl;
 }
@@ -127,14 +124,13 @@ int main(int argc, char *argv[]) {
         printf("%s \t: %s\n", __func__, argv[0]);
     }
 
-    vector<string> addresses;
-
     bool isServerArgPassed = false;
     bool isCrashSiteArgPassed = false;
     int crashSite = 0;
     string argumentString;
     bool isReadFromBackup = false;
     int numClients = 1;
+    string coordinatorAddress;
 
     if (argc > 1) {
         for (int arg = 1; arg < argc; arg++) {
@@ -142,25 +138,13 @@ int main(int argc, char *argv[]) {
             argumentString.push_back(' ');
         }
 
-        string address;
 
-        do {
-            string addressArg =
-                "--address" + to_string(addresses.size() + 1) + "=";
-            address = parseArgument(argumentString, addressArg);
-            if (!address.empty() && !isIPValid(address)) {
-                cout << __func__
-                     << "\t : Enter a valid IP address and try again!"
-                     << " Invalid IP = " << address << endl;
-                return 0;
-            }
-            if (!address.empty()) {
-                addresses.push_back(address);
-            }
-        } while (!address.empty());
+        coordinatorAddress = parseArgument(argumentString, "--coordinator_address=");
 
-        isReadFromBackup = !parseArgument(argumentString, "--readBackup=").empty();
-        cout << __func__ << "\t : Read Only Mode = " << isReadFromBackup << endl;
+        if (!isIPValid(coordinatorAddress)){
+            cout << "Enter a valid IP address, entered value is " << coordinatorAddress << endl;
+            std::quick_exit( EXIT_SUCCESS );
+        }
 
         string clientArg = parseArgument(argumentString, "--numClients=");
         if (!clientArg.empty()) {
@@ -173,10 +157,6 @@ int main(int argc, char *argv[]) {
         crashTestingEnabled = parseArgument(argumentString, "--crash=") == "true" ? true : false;
     }
 
-    if (addresses.empty()) {
-        addresses = {"localhost:50051", "localhost:50053"};
-    }
-
     const bool isCachingEnabled = false;
 
     cout << "Num Clients = " << numClients << endl;
@@ -185,16 +165,16 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < numClients; i++) {
         allReadTimes.push_back({});
         allWriteTimes.push_back({});
-        ourClients.push_back(new Client(addresses, isCachingEnabled, i, isReadFromBackup));
+        ourClients.push_back(new Client(coordinatorAddress, isCachingEnabled, i, isReadFromBackup));
     }
     vector<thread> threads;
     for (int i = 0; i < numClients; i++) {
         if (crashTestingEnabled) {
-            // threads.push_back(thread(&Client::run_application_crashTesting, ourClients[i], 10));
-            threads.push_back(thread(&Client::run_application, ourClients[i], 10));
+            //threads.push_back(thread(&Client::run_application_crashTesting, ourClients[i], 10));
+            threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
         else {
-            threads.push_back(thread(&Client::run_application, ourClients[i], 10));
+            threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
     }
     for (int i = 0; i < numClients; i++) {
@@ -227,7 +207,7 @@ int Client::run_application(int NUM_RUNS = 50) {
         struct timespec write_start, write_end;
         get_time(&write_start);
 
-        int result = client_write(key, write_data);
+        int result = client_write(key, write_data, Consistency::strong);
 
         get_time(&write_end);
         writeTimes.push_back(
@@ -247,7 +227,7 @@ int Client::run_application(int NUM_RUNS = 50) {
         struct timespec read_start, read_end;
         get_time(&read_start);
 
-        result = client_read(key, value);
+        result = client_read(key, value, Consistency::eventual);
 
         get_time(&read_end);
         readTimes.push_back(

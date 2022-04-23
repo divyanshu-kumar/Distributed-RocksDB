@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <ctime>
 #include <memory>
+#include <queue>
 #include <sstream>
 #include <signal.h>
 #include <unordered_set>
@@ -47,6 +48,13 @@ int msleep(long msec) {
     } while (res && errno == EINTR);
 
     return res;
+}
+
+string getConsistencyString(Consistency consistency){
+    if(consistency == Consistency::strong)
+        return "strong";
+    else
+        return "eventual";
 }
 
 bool isRoleValid(const string &role) {
