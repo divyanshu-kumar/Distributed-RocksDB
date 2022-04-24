@@ -47,7 +47,13 @@ int main(int argc, char** argv) {
         
         my_address = parseArgument(argumentString, "--my_address=");
         coordinator_address = parseArgument(argumentString, "--coordinator_address=");
-        
+
+        // only for dev purpose, take default address of coordinator to be 0.0.0.0:50051
+        if (coordinator_address.empty()) {
+            coordinator_address = "0.0.0.0:50051";
+        }
+
+        writeThreadPoolEnabled = parseArgument(argumentString, "--writeThreadPool=") == "true" ? true : false;
         crashTestingEnabled = parseArgument(argumentString, "--crash=") == "true" ? true : false;
 
         if (!isIPValid(my_address) || !isIPValid(coordinator_address)) {

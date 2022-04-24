@@ -141,7 +141,12 @@ int main(int argc, char *argv[]) {
 
         coordinatorAddress = parseArgument(argumentString, "--coordinator_address=");
 
-        if (!isIPValid(coordinatorAddress)){
+        // only for dev purpose, take default address of coordinator to be 0.0.0.0:50051
+        if (coordinatorAddress.empty()) {
+            coordinatorAddress = "0.0.0.0:50051";
+        }
+
+        if (!isIPValid(coordinatorAddress)) {
             cout << "Enter a valid IP address, entered value is " << coordinatorAddress << endl;
             exit(1);
         }
