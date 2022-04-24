@@ -272,7 +272,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
         lock_guard<mutex> guard(blockLock[wr->key()]);
 
-        if (false && currentRole == "primary") {  // TODO
+        if (currentRole == "primary") {  // TODO
             if (crashTestingEnabled) {
                 if (wr->key() == 5) {
                     raise(SIGSEGV);

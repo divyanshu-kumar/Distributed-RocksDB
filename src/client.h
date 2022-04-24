@@ -77,7 +77,8 @@ class DistributedRocksDBClient {
                 if (debugMode <= DebugLevel::LevelError) {
                     cout << __func__ << "\t : Retrying to server "
                         << serverAddress << " with timeout (ms) of " 
-                        << currentBackoff << " MULTIPLIER = " << MULTIPLIER << endl;
+                        << currentBackoff << " MULTIPLIER = " << MULTIPLIER 
+                        << " for key = " << key << endl;
                 }
             }
         }
@@ -149,7 +150,8 @@ class DistributedRocksDBClient {
                 if (debugMode <= DebugLevel::LevelError) {
                     cout << __func__ << "\t : Retrying to "
                          << serverAddress << " with timeout (ms) of "
-                         << currentBackoff << endl;
+                         << currentBackoff 
+                         << " for key = " << key << endl;
                 }
             }
         }
@@ -300,7 +302,10 @@ public:
 
     int run_application(int NUM_RUNS);
     int client_read(uint32_t key, string &value, Consistency consistency);
+    double read_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
+
     int client_write(uint32_t key, const string &value, Consistency consistency);
+    double write_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
 
     string selectBackupServerForRead(){
         lock_guard<mutex> guard(systemStateLock);
@@ -314,7 +319,10 @@ public:
     ServerInfo* getServerToContact(Consistency consistency, bool isWriteRequest){        
         if(!isWriteRequest && consistency == Consistency::eventual && !backupAddresses.empty()){
             string backupAddress = selectBackupServerForRead();
-            cout << "selecting server "<< backupAddress << endl;
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "selecting server "<< backupAddress << endl;
+            }
+            
             if(serverInfos.find(backupAddress) == serverInfos.end()){
                 cout << __func__ << " could not find " << backupAddress <<" gRPC connection" << endl;
                 std::quick_exit( EXIT_SUCCESS );
@@ -329,11 +337,13 @@ public:
                 cout << "ERR: No server info for primary address " << primary << endl;
                 std::quick_exit( EXIT_SUCCESS );
         }
-        cout << "selecting server "<< primary << endl;
+        if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "selecting server "<< primary << endl;
+        }
         return serverInfos[primary];
     }
 
-    void initServerInfo(vector<string> newAddresses) {
+    void initServerInfo(vector<string> newAddresses, const bool &needNotificationThread) {
         for (string address : newAddresses) {
             if (debugMode <= DebugLevel::LevelInfo) {
                 cout << __func__ << "\t : create gRPC Connection for " << address << endl; 
@@ -343,10 +353,12 @@ public:
             } else
                 serverInfos[address] = new ServerInfo(address);
         }
-        // TODO: Cache notification thread is crashing. Currently disabled temporarily
-        // notificationThread = (std::thread(cacheInvalidationListener, (serverInfos[primary]),
-        //     isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
-        msleep(1);
+        if(needNotificationThread){
+            // TODO: Cache notification thread is crashing. Currently disabled temporarily
+            notificationThread = (std::thread(cacheInvalidationListener, (serverInfos[primaryAddress]),
+                                              isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
+            msleep(1);
+        }
     }
 
 
@@ -393,7 +405,10 @@ public:
                 }
             }
         }
-
+        bool needNotificationThread = true;
+        if(primaryAddress == systemStateMsg.primary()){
+            needNotificationThread = false;
+        }
         primaryAddress = systemStateMsg.primary();
 
          if(serverInfos.find(primaryAddress) == serverInfos.end()){
@@ -407,7 +422,7 @@ public:
             }
         }
         
-        initServerInfo(newAddresses);
+        initServerInfo(newAddresses, needNotificationThread);
     }
 
     int getSystemState(){
@@ -471,9 +486,9 @@ public:
 
     ~Client() {
         // TODO: currently notification thread is disabled, as its crashing. Check this
-        // if(serverInfos.find(primaryAddress) != serverInfos.end())
-        //     (serverInfos[primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
-        //notificationThread.join();
+        if(serverInfos.find(primaryAddress) != serverInfos.end())
+            (serverInfos[primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
+        notificationThread.join();
         for (auto iter = serverInfos.begin(); iter != serverInfos.end(); ++iter) {
             delete iter->second;
         }

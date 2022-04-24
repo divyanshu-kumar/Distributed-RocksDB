@@ -12,10 +12,26 @@ void getRandomText(string &str, int size);
 vector<vector<pair<double, int>>> allReadTimes, allWriteTimes;
 void saveData(const vector<pair<double, int>> & v, const string & filename);
 
+
+bool cacheStalenessValidation(const uint32_t &key, 
+    unordered_map<int, CacheInfo> & cacheMap) {
+    if (!cacheMap[key].isCached || cacheMap[key].isStale())
+        return false;
+    return true;
+}
+
 int Client::client_read(const uint32_t key, string &value, Consistency consistency) {
     if (debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << "\t : Key = " << key
              << ", ReadFromBackup = " << readFromBackup << endl;
+    }
+
+    if (isCachingEnabled && cacheStalenessValidation(key, cacheMap)) {
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Cached data found!" << endl;
+        }
+        value = cacheMap[key].data;
+        return value.length();
     }
 
     int res = 0;
@@ -32,7 +48,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
         if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
                 cout << __func__
-                    << "\t : Write request timed-out, Connecting to coordinator and retrying"
+                    << "\t : Read for key:" << key << "request timed-out, Connecting to coordinator and retrying"
                     << endl;
             }
             getSystemState();
@@ -44,6 +60,13 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
             cout << __func__ << "\t : request did not succeed " << endl;
         }
         return -1;
+    }
+
+    if (consistency == Consistency::strong && isCachingEnabled) {
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Caching address : " << key << endl;
+        }
+        cacheMap[key].cacheData(value);
     }
 
     return res;
@@ -66,7 +89,7 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
         if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
                 cout << __func__
-                    << "\t : Write request timed-out, Connecting to coordinator and retrying"
+                    << "\t : Write for key = " << key << "request timed-out, Connecting to coordinator and retrying"
                     << endl;
             }
             getSystemState();
@@ -187,6 +210,46 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
+double Client::write_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
+    struct timespec write_start, write_end;
+    get_time(&write_start);
+
+    int result = client_write(key, value, consistency);
+
+    get_time(&write_end);
+
+    if ((result < 0) &&
+        (debugMode <= DebugLevel::LevelError)) {
+        printf("Failed to set the key = %d\n", key);
+    }
+
+    if (debugMode <= DebugLevel::LevelInfo) {
+        cout << __func__ << " \t : Written Key = " << key << ", value = " << value << endl;
+    }
+
+    return get_time_diff(&write_start, &write_end);
+}
+
+double Client::read_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
+    struct timespec read_start, read_end;
+    get_time(&read_start);
+
+    int result = client_read(key, value, consistency);
+
+    get_time(&read_end);
+
+    if ((result < 0) && (debugMode <= DebugLevel::LevelError)) {
+            printf(
+                "Failed to get the key = %d!\n", key);
+    }
+
+    if (result == 0 && debugMode <= DebugLevel::LevelInfo) {
+        cout << __func__ << " \t : Read Key = " << key << ", value = " << value << endl;
+    }
+
+    return get_time_diff(&read_start, &read_end);
+}
+
 int Client::run_application(int NUM_RUNS = 50) {
     vector<pair<double, int>> &readTimes = allReadTimes[clientThreadId],
                               &writeTimes = allWriteTimes[clientThreadId];
@@ -197,6 +260,7 @@ int Client::run_application(int NUM_RUNS = 50) {
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist6(0, 100);
     std::uniform_int_distribution<std::mt19937::result_type> dist7(0, (int)1e6);
+    // std::uniform_int_distribution<std::mt19937::result_type> dist7(0, (int)100);
 
     for (int i = 0; i < NUM_RUNS; i++) {
         getRandomText(write_data, 10);
@@ -204,44 +268,14 @@ int Client::run_application(int NUM_RUNS = 50) {
         string value;
         uint32_t key = (int)dist7(rng);
         
-        struct timespec write_start, write_end;
-        get_time(&write_start);
+        double writeTime = write_wrapper(key, write_data, Consistency::strong);
+        writeTimes.push_back(make_pair(writeTime, key));
 
-        int result = client_write(key, write_data, Consistency::strong);
-
-        get_time(&write_end);
-        writeTimes.push_back(
-            make_pair(get_time_diff(&write_start, &write_end), key));
-
-        if ((result < 0) &&
-            (debugMode <= DebugLevel::LevelError)) {
-            printf("Failed to set the key = %d\n", key);
-        }
-
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << " \t : Written Key = " << key << ", value = " << write_data << endl;
-        }
-
+       
         msleep((int)dist6(rng));
 
-        struct timespec read_start, read_end;
-        get_time(&read_start);
-
-        result = client_read(key, value, Consistency::eventual);
-
-        get_time(&read_end);
-        readTimes.push_back(
-            make_pair(get_time_diff(&read_start, &read_end), key));
-
-        if ((result < 0) && (debugMode <= DebugLevel::LevelError)) {
-            printf(
-                "Failed to get the key = %d!\n", key);
-        }
-
-        if (result == 0 && debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << " \t : Read Key = " << key << ", value = " << value << endl;
-        }
-
+        double readTime = read_wrapper(key, value, Consistency::strong);
+        readTimes.push_back(make_pair(readTime, key));
 
         msleep((int)dist6(rng));
     }
