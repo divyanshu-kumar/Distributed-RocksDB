@@ -9,14 +9,19 @@
 #include <dirent.h>
 #include <cstring>
 #include <chrono>
+#include <atomic>
 
 using namespace std;
 
 class TxnManager {
     private:
+        // for locking put
         mutex outer_mutex;
-        unordered_map<string,string> txns;
         unordered_map<string, shared_mutex> mutices;
+
+        atomic<uint32_t> active_txn_count = {0};
+
+        unordered_map<string,string> txns;
         string storage_path;
         int lastLogIndex;
         const string LOG_PREFIX = string("self.log.");
@@ -105,4 +110,9 @@ class TxnManager {
          * @param key_mutex 
          */
         void releasePutLock(unique_lock<shared_mutex>& key_mutex);
+
+
+        void incActiveTxnCount();
+        void decActiveTxnCount();
+        uint32_t getTxnCount();
 };

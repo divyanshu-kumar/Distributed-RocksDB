@@ -18,32 +18,32 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
              << ", ReadFromBackup = " << readFromBackup << endl;
     }
 
-    ServerInfo* serverToContact = getServerToContact(consistency, false);
-
-    if (debugMode <= DebugLevel::LevelInfo) {
-        cout << __func__ << "\t : Contacting server "
-             << serverToContact->address << endl;
-    }
-
-    int res = (serverToContact->connection)
-                  ->rpc_read(key, value, isCachingEnabled, 
-                  clientIdentifier, serverToContact->address, consistency);
-
-    if (res == SERVER_OFFLINE_ERROR_CODE) {
-        if (debugMode <= DebugLevel::LevelError) {
-            cout << __func__
-                << "\t : Read request timed-out, trying to contact other "
-                    "server now."
-                << endl;
+    int res = 0;
+    
+    do {
+        ServerInfo* serverToContact = getServerToContact(consistency, false);
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Contacting server "
+                 << serverToContact->address << endl;
         }
         res = (serverToContact->connection)->rpc_read(key, value, isCachingEnabled, 
-                clientIdentifier, serverToContact->address, consistency);
-        if (res < 0) {
+                  clientIdentifier, serverToContact->address, consistency);
+
+        if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Both servers are offline!" << endl;
+                cout << __func__
+                    << "\t : Write request timed-out, Connecting to coordinator and retrying"
+                    << endl;
             }
-            return -1;
+            getSystemState();
         }
+    } while(res == SERVER_OFFLINE_ERROR_CODE);
+    
+    if (res < 0) {
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : request did not succeed " << endl;
+        }
+        return -1;
     }
 
     return res;
@@ -54,26 +54,30 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
         cout << __func__ << "\t : Key = " << key << endl;
     }
 
-    ServerInfo* serverToContact = getServerToContact(consistency, true);
+    int res = 0;
 
-    int res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency);
-
-    if (res == SERVER_OFFLINE_ERROR_CODE) {
-        if (debugMode <= DebugLevel::LevelError) {
-            cout << __func__
-                << "\t : Write request timed-out, trying to contact other "
-                    "server now."
-                << endl;
+    do {
+        ServerInfo* serverToContact = getServerToContact(consistency, true);
+        if (debugMode <= DebugLevel::LevelInfo) {
+             cout << __func__ << "\t : Contacting server "
+                 << serverToContact->address << endl;
         }
-        // TODO: in case of error, update the state from backup
         res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency);
-
-        if (res < 0) {
+        if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Both servers are offline!" << endl;
+                cout << __func__
+                    << "\t : Write request timed-out, Connecting to coordinator and retrying"
+                    << endl;
             }
-            return -1;
+            getSystemState();
         }
+    } while(res == SERVER_OFFLINE_ERROR_CODE);
+    
+    if (res < 0) {
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : request did not succeed " << endl;
+        }
+        return -1;
     }
 
     return res;
@@ -83,31 +87,27 @@ void cacheInvalidationListener(
     ServerInfo* serverToContact,
     bool isCachingEnabled, string clientIdentifier, unordered_map<int, CacheInfo> & cacheMap) {
 
-    cout << __func__ << "\t : Listening for notifications.." << endl;
     Status status = grpc::Status::OK;
-    do {
-        
-        status = (serverToContact->connection)->rpc_subscribeForNotifications(isCachingEnabled, clientIdentifier, cacheMap);
+    status = (serverToContact->connection)->rpc_subscribeForNotifications(isCachingEnabled, clientIdentifier, cacheMap);
+    if (debugMode <= DebugLevel::LevelInfo) {
+        cout << __func__ << "\t : Error code = " << status.error_code()
+                << " and message = " << status.error_message() << endl;
+    }
 
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Error code = " << status.error_code()
-                 << " and message = " << status.error_message() << endl;
-        }
-
-        if (status.error_code() == grpc::StatusCode::UNAVAILABLE) {
-
+    if (status.error_code() == grpc::StatusCode::UNAVAILABLE) {
+        if(isCachingEnabled){
             for (auto &cachedEntry : cacheMap) {
                 cachedEntry.second.invalidateCache();
             }
             if (debugMode <= DebugLevel::LevelNone) {
                 cout << __func__ << "\t : Invalidated all cached entries as changing server!" << endl;
             }
-            // TODO: Check if there needs to be any change in serverInfo
-            if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Should change server  " << endl;
-            }
         }
-    } while (grpc::StatusCode::UNAVAILABLE == status.error_code());
+        // TODO: Check if there needs to be any change in serverInfo
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : Should change server  " << endl;
+        }
+    }
 
     cout << __func__ << "\t : Stopped listening for notifications now." << endl;
 }
@@ -148,7 +148,7 @@ int main(int argc, char *argv[]) {
 
         if (!isIPValid(coordinatorAddress)) {
             cout << "Enter a valid IP address, entered value is " << coordinatorAddress << endl;
-            exit(1);
+            std::quick_exit( EXIT_SUCCESS );
         }
 
         string clientArg = parseArgument(argumentString, "--numClients=");
@@ -176,10 +176,10 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < numClients; i++) {
         if (crashTestingEnabled) {
             //threads.push_back(thread(&Client::run_application_crashTesting, ourClients[i], 10));
-            threads.push_back(thread(&Client::run_application, ourClients[i], 10));
+            threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
         else {
-            threads.push_back(thread(&Client::run_application, ourClients[i], 10));
+            threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
     }
     for (int i = 0; i < numClients; i++) {
