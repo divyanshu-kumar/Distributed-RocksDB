@@ -89,3 +89,12 @@ foreach(_target
         ${_GRPC_GRPCPP}
         ${_PROTOBUF_LIBPROTOBUF})
 endforeach()
+
+# TEMPs
+foreach(_target
+    txn_manager)
+    add_executable(${_target} "util/${_target}.cc")
+    target_link_libraries(${_target}
+        stdc++fs
+        pthread)
+endforeach()

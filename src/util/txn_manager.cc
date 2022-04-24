@@ -90,6 +90,18 @@ int TxnManager::getLastLogIndex() {
     return lastLogIndex;
 }
 
+void TxnManager::incActiveTxnCount() {
+    active_txn_count++;
+}
+
+void TxnManager::decActiveTxnCount() {
+    active_txn_count--;
+}
+
+uint32_t TxnManager::getTxnCount() {
+    return active_txn_count.load();
+}
+
 vector<string> TxnManager::getTxnKeys(int logIndex) {
     vector<string> keys;
 
@@ -152,6 +164,41 @@ void testMultiThreadSame(TxnManager *tm) {
     }
 }
 
+void increment(TxnManager *tm) {
+    tm->incActiveTxnCount();
+}
+
+void decrement(TxnManager *tm, int id) {
+    tm->decActiveTxnCount();
+}
+
+void testTxnCount(TxnManager *tm) {
+    int N = 100;
+    future<void> workersInc[N];
+    future<void> workersDec[N];
+
+    for(int i = 0; i < N; i++) {
+        workersInc[i] = async(increment, tm);
+    }
+
+    for(int i = 0; i < N; i++) {
+        workersInc[i].get();
+    }
+
+    cout << "After inc Count:" << tm->getTxnCount() << endl;
+
+    for(int i = 0; i < N; i++) {
+        workersDec[i] = async(decrement, tm, i);
+    }
+
+    for(int i = 0; i < N; i++) {
+        workersDec[i].get();
+    }
+
+    cout << "After Dec Count:" << tm->getTxnCount() << endl;
+
+}
+
 int main() {
     TxnManager *tm = new TxnManager("/users/dkumar27/Distributed-RocksDB/logs");
 
@@ -166,6 +213,9 @@ int main() {
     end = chrono::high_resolution_clock::now();
     time_taken = chrono::duration_cast<chrono::nanoseconds> (end - begin).count();
     cout << "time_taken[Same]:" << time_taken << endl;
+
+    testTxnCount(tm);
+
 
     // tm.put("hello1", "world1");
 

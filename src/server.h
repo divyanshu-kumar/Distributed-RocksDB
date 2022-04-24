@@ -410,7 +410,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
         if (primaryAddress == my_address) {
             if (role != "primary") {
-                if (debugMode <= DebugLevel::LevelInfo) {
+                if (debugMode <= DebugLevel::LevelError) {
                     cout << __func__ << "\t : Role changed to primary." << endl;
                 }
                 if (writeThreadPoolEnabled) {
@@ -480,8 +480,8 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
             sendWritesToBackups(address, key, value);
 
-            workDone.notify_one();
             ++(*countSent);
+            workDone.notify_all();
         }
     }
 };
