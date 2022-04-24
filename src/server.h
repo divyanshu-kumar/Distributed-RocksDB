@@ -57,6 +57,7 @@ struct NotificationInfo {
     unordered_map<string, bool> subscriberShouldRun;
     unordered_map<int, unordered_set<string>> subscribedClients;
     unordered_map<string, ServerWriter<ClientCacheNotify>*> clientWriters;
+    unordered_map<string, std::mutex> clientNotifyLocks;
 
     void Subscribe(int address, const string& id) {
         if (debugMode <= DebugLevel::LevelInfo) {
@@ -123,6 +124,7 @@ struct NotificationInfo {
                  << endl;
         }
         try {
+            lock_guard<std::mutex> lock(clientNotifyLocks[id]);
             ServerWriter<ClientCacheNotify>* writer = clientWriters[id];
             ClientCacheNotify notifyReply;
             notifyReply.set_key(address);
@@ -226,9 +228,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
                  << currentRole << endl;
         }
 
-        if (true ||
-            currentRole ==
-                "primary") {  // TODO - Decide if want to lock only for primary
+        if (currentRole == "primary") {
             blockLock[rr->key()].lock();
         }
 
@@ -250,9 +250,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         reply->set_value(buf);
         reply->set_err(0);
 
-        if (true ||
-            currentRole ==
-                "primary") {  // TODO - Decide if want to lock only for primary
+        if (currentRole == "primary") {
             blockLock[rr->key()].unlock();
         }
 

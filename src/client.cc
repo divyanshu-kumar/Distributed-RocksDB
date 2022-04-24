@@ -35,7 +35,8 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
     }
 
     int res = 0;
-    
+    int numRetriesDone = 0;
+
     do {
         ServerInfo* serverToContact = getServerToContact(consistency, false);
         if (debugMode <= DebugLevel::LevelInfo) {
@@ -52,9 +53,10 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
                     << endl;
             }
             getSystemState();
+            numRetriesDone++;
         }
-    } while(res == SERVER_OFFLINE_ERROR_CODE);
-    
+    } while((res == SERVER_OFFLINE_ERROR_CODE) && (numRetriesDone < 2));
+
     if (res < 0) {
         if (debugMode <= DebugLevel::LevelError) {
             cout << __func__ << "\t : request did not succeed " << endl;
@@ -78,6 +80,7 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
     }
 
     int res = 0;
+    int numRetriesDone = 0;
 
     do {
         ServerInfo* serverToContact = getServerToContact(consistency, true);
@@ -93,8 +96,9 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
                     << endl;
             }
             getSystemState();
+            numRetriesDone++;
         }
-    } while(res == SERVER_OFFLINE_ERROR_CODE);
+    } while((res == SERVER_OFFLINE_ERROR_CODE) && (numRetriesDone < 2));
     
     if (res < 0) {
         if (debugMode <= DebugLevel::LevelError) {
@@ -185,7 +189,7 @@ int main(int argc, char *argv[]) {
         crashTestingEnabled = parseArgument(argumentString, "--crash=") == "true" ? true : false;
     }
 
-    const bool isCachingEnabled = false;
+    const bool isCachingEnabled = true;
 
     cout << "Num Clients = " << numClients << endl;
 
@@ -265,7 +269,6 @@ int Client::run_application(int NUM_RUNS = 50) {
     std::mt19937 rng(dev());
     std::uniform_int_distribution<std::mt19937::result_type> dist6(0, 100);
     std::uniform_int_distribution<std::mt19937::result_type> dist7(0, (int)1e6);
-    // std::uniform_int_distribution<std::mt19937::result_type> dist7(0, (int)100);
 
     for (int i = 0; i < NUM_RUNS; i++) {
         getRandomText(write_data, 10);
@@ -280,6 +283,11 @@ int Client::run_application(int NUM_RUNS = 50) {
         msleep((int)dist6(rng));
 
         double readTime = read_wrapper(key, value, Consistency::strong);
+        readTimes.push_back(make_pair(readTime, key));
+
+        msleep((int)dist6(rng));
+
+        readTime = read_wrapper(key, value, Consistency::strong);
         readTimes.push_back(make_pair(readTime, key));
 
         msleep((int)dist6(rng));
