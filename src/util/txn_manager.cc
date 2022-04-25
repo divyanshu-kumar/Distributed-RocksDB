@@ -98,12 +98,30 @@ void TxnManager::decActiveTxnCount() {
     active_txn_count--;
 }
 
-uint32_t TxnManager::getTxnCount() {
+uint32_t TxnManager::getActiveTxnCount() {
     return active_txn_count.load();
+}
+
+uint32_t TxnManager::getInMemoryTxnCount() {
+    return txns.size();
+}
+
+vector<string> TxnManager::getCurrTxnKeys() {
+    return getTxnKeys(lastLogIndex + 1);
 }
 
 vector<string> TxnManager::getTxnKeys(int logIndex) {
     vector<string> keys;
+    keys.clear();
+
+    // caller is asking for in memory keys
+    if (logIndex == lastLogIndex + 1) {
+        for(auto it: txns) {
+            keys.push_back(it.first);
+        }
+
+        return keys;
+    }
 
     string logPath = computeLogPath(logIndex);
 
@@ -185,7 +203,7 @@ void testTxnCount(TxnManager *tm) {
         workersInc[i].get();
     }
 
-    cout << "After inc Count:" << tm->getTxnCount() << endl;
+    cout << "After inc Count:" << tm->getActiveTxnCount() << endl;
 
     for(int i = 0; i < N; i++) {
         workersDec[i] = async(decrement, tm, i);
@@ -195,7 +213,7 @@ void testTxnCount(TxnManager *tm) {
         workersDec[i].get();
     }
 
-    cout << "After Dec Count:" << tm->getTxnCount() << endl;
+    cout << "After Dec Count:" << tm->getActiveTxnCount() << endl;
 
 }
 
