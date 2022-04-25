@@ -2,6 +2,7 @@
 #include "fs_utils.h"
 #include "distributedRocksDB.grpc.pb.h"
 #include "util/txn_manager.h"
+#include <future>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -32,6 +33,7 @@ const int MAX_NUM_RETRIES = 5;
 const int INITIAL_BACKOFF_MS = 100;
 const int MULTIPLIER = 2;
 const int NUM_WORKER_THREADS = 100;
+const int TXN_FLUSH_THRESHOLD = 10;
 
 string currentWorkDir, dataDirPath, writeTxLogsDirPath;
 
@@ -394,6 +396,13 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         return Status::OK;
     }
 
+    Status rpc_flush(ServerContext* context, const TxnFlushRequest* request, TxnFlushReply* reply) override {
+        // No need to coordinate. Primary coordinates everything
+        tm->flush();
+
+        return Status::OK;
+    }
+
     void initiateThreadPool() {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Intiating " << threadPool.size()
@@ -423,6 +432,52 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     std::queue<WriteInfo> writeQueue;
     std::mutex writeQMutex;
     std::condition_variable work, workDone;
+
+
+    grpc::Status execFlushInReplica(string ip, std::unique_ptr<DistributedRocksDBService::Stub> *stub) {
+        cout << "[INFO]: Flush-START for ip:" << ip << endl;
+
+        ClientContext context;
+        TxnFlushRequest request;
+        TxnFlushReply reply;
+
+        // TODO: need to populate request? for not stalling the write requests
+        grpc::Status status = (*stub)->rpc_flush(&context, request, &reply);
+
+        if (status.ok()) {
+            cout << "[INFO]: flush success at ip:" << ip << endl;
+        } else {
+            cout << "[INFO]: flush failed at ip:" << ip << endl;
+        }
+
+        cout << "[INFO]: Flush-END for ip:" << ip << endl;
+
+        return status;
+    }
+
+    void flush() {
+        // wait till active txns are finished
+        while(tm->getActiveTxnCount() == 0) {
+            sleep(3);
+        }
+
+        int REPLICA_COUNT = stubs.size();
+
+        future<grpc::Status> flushes[REPLICA_COUNT];
+
+        int i = 0;
+        for (const auto& b: backups) {
+            flushes[i] = async(launch::async, &ServerReplication::execFlushInReplica, this, b, &stubs[b]);
+            i++;
+        }
+
+        for(int i = 0; i < REPLICA_COUNT; i++) {
+            grpc::Status status = flushes[i].get();
+        }
+
+        tm->flush();
+        cout << "[INFO]: flushes done" << endl;
+    }
 
     void updateSystemView(SystemState systemStateMsg) {
         lock_guard<mutex> guard(systemStateLock);
@@ -470,6 +525,13 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
 
         swap(newBackups, backups);
+
+        if (role == "primary" && tm->getInMemoryTxnCount() > TXN_FLUSH_THRESHOLD) {
+            // TODO: lock global writes
+            flush();
+            // TODO: release global writes
+        }
+        
     }
 
     void replicatorThread() {

@@ -97,6 +97,13 @@ class TxnManager {
         vector<string> getTxnKeys(int logIndex);
 
         /**
+         * @brief Get the Curr Txn Keys object
+         * 
+         * @return vector<string> 
+         */
+        vector<string> getCurrTxnKeys();
+
+        /**
          * @brief Get the Put Lock object
          * 
          * @param key 
@@ -114,5 +121,6 @@ class TxnManager {
 
         void incActiveTxnCount();
         void decActiveTxnCount();
-        uint32_t getTxnCount();
+        uint32_t getActiveTxnCount();
+        uint32_t getInMemoryTxnCount();
 };

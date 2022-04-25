@@ -92,7 +92,6 @@ int main(int argc, char** argv) {
 
     backupLastWriteTime.clear();
     
-    
     RunServer();
     // System State, TxnManager
     // 1. Server-Wait - thread
@@ -101,7 +100,7 @@ int main(int argc, char** argv) {
 
     // Server-Wait - join
 
-    // delete txn_manager;
+    delete txn_manager;
     delete serverReplication;
     delete db;
 
