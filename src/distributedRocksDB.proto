@@ -58,6 +58,15 @@ message SystemState {
     repeated string backups = 2;
 }
 
+message TxnFlushRequest {
+    int32 numTxn = 1;
+    int32 logIndex = 2;
+}
+
+message TxnFlushReply {
+    int32 error = 1;
+}
+
 service DistributedRocksDBService {
     rpc rpc_read(ReadRequest) returns (ReadResult) {}
     rpc rpc_write(WriteRequest) returns (WriteResult) {}
@@ -66,4 +75,5 @@ service DistributedRocksDBService {
     rpc rpc_heartbeat(stream SystemState) returns (Heartbeat) {}
     rpc rpc_registerNewNode(RegisterRequest) returns (RegisterResult) {}
     rpc rpc_getSystemState(SystemStateRequest) returns (SystemState) {}
+    rpc rpc_flush(TxnFlushRequest) returns (TxnFlushReply) {}
 }

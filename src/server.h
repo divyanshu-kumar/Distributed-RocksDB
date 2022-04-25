@@ -1,6 +1,7 @@
 #include "utils.h"
 #include "fs_utils.h"
 #include "distributedRocksDB.grpc.pb.h"
+#include "util/txn_manager.h"
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -146,7 +147,11 @@ class ServerReplication final : public DistributedRocksDBService::Service {
    public:
     ReadCache readCache;
 
-    ServerReplication() : threadPool(NUM_WORKER_THREADS) {}
+    ServerReplication(TxnManager *_tm) : threadPool(NUM_WORKER_THREADS) {
+        tm = _tm;
+        // sometimes old values are cached, faced in P3, so needed
+        stubs.clear();
+    }
 
     int rpc_write(uint32_t key, const string& value) {
         if (debugMode <= DebugLevel::LevelInfo) {
@@ -257,6 +262,53 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         return Status::OK;
     }
 
+    void writeToDB(const WriteRequest *wr) {
+        // Common across Primary or Backup
+        ROCKSDB_NAMESPACE::Status status =
+            db->Put(WriteOptions(), to_string(wr->key()), wr->value());
+        assert(status.ok());
+
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Wrote Key " << wr->key() << endl;
+        }
+    }
+
+    void execAsPrimary(const WriteRequest* wr) {
+        writeToDB(wr);
+
+        if (writeThreadPoolEnabled) { // Parallel writes to thread pool if feature is enabled
+            std::atomic<int> replicateCount = 0;
+            std::unique_lock<std::mutex> lock(writeQMutex);
+
+            systemStateLock.lock();
+            unordered_set<string> currentBackups(backups);
+            systemStateLock.unlock();
+
+            for (auto& backupAddress : currentBackups) {
+                writeQueue.push(WriteInfo(wr->key(), wr->value(),
+                                            backupAddress, replicateCount));
+                work.notify_one();
+            }
+
+            workDone.wait(lock, [&] {
+                return replicateCount == currentBackups.size();
+            });
+        } else {  // Parallel writes to new threads created on demand
+            int result = this->rpc_write(wr->key(), wr->value());
+            if (result != 0) {
+                printf("%s \t : Error : Failed to write to backups",
+                        __func__);
+            }
+        }
+
+        return;
+    }
+
+    void execAsReplica(const WriteRequest *wr) {
+        writeToDB(wr);
+        tm->put(to_string(wr->key()), wr->value());
+    }
+
     Status rpc_write(ServerContext* context, const WriteRequest* wr,
                      WriteResult* reply) override {
         systemStateLock.lock();
@@ -283,45 +335,26 @@ class ServerReplication final : public DistributedRocksDBService::Service {
             cout << __func__ << "\t : About to write Key " << wr->key() << endl;
         }
 
-        ROCKSDB_NAMESPACE::Status status =
-            db->Put(WriteOptions(), to_string(wr->key()), wr->value());
-        assert(status.ok());
+        // In case of Primary, replicate the data
+        if (currentRole == "primary") {
+            // TXN management stuff - START
+            unique_lock<shared_mutex> putLock = tm->getPutLock(to_string(wr->key()));
+            tm->incActiveTxnCount();
+            tm->put(to_string(wr->key()), wr->value());
 
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Wrote Key " << wr->key() << endl;
+            execAsPrimary(wr);
+            
+            // TXN management stuff - END
+            tm->releasePutLock(putLock);
+            tm->decActiveTxnCount();
+        } else {
+            // backup is dumb and does not do anything
+            tm->incActiveTxnCount();
+            execAsReplica(wr);
+            tm->decActiveTxnCount();
         }
 
         reply->set_err(0);
-
-        if (currentRole == "primary") {
-            // Parallel writes to thread pool if feature is enabled
-            if (writeThreadPoolEnabled) {
-                std::atomic<int> replicateCount = 0;
-                std::unique_lock<std::mutex> lock(writeQMutex);
-
-                systemStateLock.lock();
-                unordered_set<string> currentBackups(backups);
-                systemStateLock.unlock();
-
-                for (auto& backupAddress : currentBackups) {
-                    writeQueue.push(WriteInfo(wr->key(), wr->value(),
-                                              backupAddress, replicateCount));
-                    work.notify_one();
-                }
-
-                workDone.wait(lock, [&] {
-                    return replicateCount == currentBackups.size();
-                });
-            }
-            // Parallel writes to new threads created on demand
-            else {
-                int result = this->rpc_write(wr->key(), wr->value());
-                if (result != 0) {
-                    printf("%s \t : Error : Failed to write to backups",
-                           __func__);
-                }
-            }
-        }
 
         return Status::OK;
     }
@@ -390,12 +423,20 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
     }
 
+    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>>* getStubs() {
+        return &stubs;
+    }
+
+    TxnManager* getTxnManager() {
+        return tm;
+    }
+
    private:
+    TxnManager *tm;
     mutex systemStateLock;
     string primaryAddress;
     unordered_set<string> backups;
-    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>>
-        stubs;
+    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>> stubs;
     vector<std::thread*> threadPool;
     std::queue<WriteInfo> writeQueue;
     std::mutex writeQMutex;

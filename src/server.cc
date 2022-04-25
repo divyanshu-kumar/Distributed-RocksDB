@@ -85,12 +85,23 @@ int main(int argc, char** argv) {
     ROCKSDB_NAMESPACE::Status s = DB::Open(options, kDBPath, &db);
     assert(s.ok());
 
-    serverReplication = new ServerReplication;
+    // Recovery
+    TxnManager *txn_manager = new TxnManager("/users/dkumar27/Distributed-RocksDB/logs");
+
+    serverReplication = new ServerReplication(txn_manager);
 
     backupLastWriteTime.clear();
-
+    
+    
     RunServer();
+    // System State, TxnManager
+    // 1. Server-Wait - thread
+    // 2. Flush - No thread but, do on update System View
+    // 3. Prod-Cons - replication
 
+    // Server-Wait - join
+
+    // delete txn_manager;
     delete serverReplication;
     delete db;
 
