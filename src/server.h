@@ -322,6 +322,10 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         // In case of Primary, replicate the data
         if (currentRole == "primary") {
             // TXN management stuff - START
+            tm->acquireFlushLockForWrite();
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Acquired flush lock for write, key = " << wr->key() << endl;
+            }
             unique_lock<shared_mutex> putLock = tm->getPutLock(to_string(wr->key()));
             tm->incActiveTxnCount();
             tm->put(to_string(wr->key()), wr->value());
@@ -331,6 +335,10 @@ class ServerReplication final : public DistributedRocksDBService::Service {
             // TXN management stuff - END
             tm->releasePutLock(putLock);
             tm->decActiveTxnCount();
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Releasing flush lock for write, key = " << wr->key() << endl;
+            }
+            tm->releaseFlushLockForWrite();
         } else {
             // backup is dumb and does not do anything
             tm->incActiveTxnCount();
@@ -457,7 +465,11 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     void flush() {
         // wait till active txns are finished
-        while(tm->getActiveTxnCount() == 0) {
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Starting to flush." << endl;
+        }
+
+        while(tm->getActiveTxnCount() != 0) {
             sleep(3);
         }
 
@@ -527,9 +539,19 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         swap(newBackups, backups);
 
         if (role == "primary" && tm->getInMemoryTxnCount() > TXN_FLUSH_THRESHOLD) {
-            // TODO: lock global writes
+            tm->acquireFlushLockForFlush();
+
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Successfully acquired flush lock" << endl;
+            }
+
             flush();
-            // TODO: release global writes
+
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Releasing flush lock" << endl;
+            }
+
+            tm->releaseFlushLockForFlush();
         }
         
     }

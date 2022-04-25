@@ -10,6 +10,7 @@
 #include <cstring>
 #include <chrono>
 #include <atomic>
+#include <shared_mutex>
 
 using namespace std;
 
@@ -17,6 +18,7 @@ class TxnManager {
     private:
         // for locking put
         mutex outer_mutex;
+        std::shared_mutex flush_mutex;
         unordered_map<string, shared_mutex> mutices;
 
         atomic<uint32_t> active_txn_count = {0};
@@ -118,6 +120,25 @@ class TxnManager {
          */
         void releasePutLock(unique_lock<shared_mutex>& key_mutex);
 
+        /**
+         * @brief acquires the flush lock for writes 
+         */
+        void acquireFlushLockForWrite() { flush_mutex.lock_shared(); }
+
+        /**
+         * @brief releases the flush lock for writes 
+         */
+        void releaseFlushLockForWrite() { flush_mutex.unlock_shared(); }
+
+        /**
+         * @brief acquires the flush lock for flush 
+         */
+        void acquireFlushLockForFlush() { flush_mutex.lock(); }
+
+        /**
+         * @brief releases the flush lock for flush 
+         */
+        void releaseFlushLockForFlush() { flush_mutex.unlock(); }
 
         void incActiveTxnCount();
         void decActiveTxnCount();
