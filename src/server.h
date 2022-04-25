@@ -276,32 +276,14 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     void execAsPrimary(const WriteRequest* wr) {
         writeToDB(wr);
 
-        if (writeThreadPoolEnabled) { // Parallel writes to thread pool if feature is enabled
-            std::atomic<int> replicateCount = 0;
-            std::unique_lock<std::mutex> lock(writeQMutex);
-
-            systemStateLock.lock();
-            unordered_set<string> currentBackups(backups);
-            systemStateLock.unlock();
-
-            for (auto& backupAddress : currentBackups) {
-                writeQueue.push(WriteInfo(wr->key(), wr->value(),
-                                            backupAddress, replicateCount));
-                work.notify_one();
-            }
-
-            workDone.wait(lock, [&] {
-                return replicateCount == currentBackups.size();
-            });
-        } else {  // Parallel writes to new threads created on demand
-            int result = this->rpc_write(wr->key(), wr->value());
-            if (result != 0) {
-                printf("%s \t : Error : Failed to write to backups",
-                        __func__);
-            }
+        if (wr->consistency() == getConsistencyString(Consistency::fast_acknowledge)) {
+            std::thread asyncWriteThread(&ServerReplication::replicateToBackups, this, *wr);
+            asyncWriteThread.detach();
+        }
+        else {
+            replicateToBackups(*wr);
         }
 
-        return;
     }
 
     void execAsReplica(const WriteRequest *wr) {
@@ -522,6 +504,35 @@ class ServerReplication final : public DistributedRocksDBService::Service {
             ++(*countSent);
             workDone.notify_all();
         }
+    }
+    
+    void replicateToBackups(const WriteRequest wr) {
+        if (writeThreadPoolEnabled) { // Parallel writes to thread pool if feature is enabled
+            std::atomic<int> replicateCount = 0;
+            std::unique_lock<std::mutex> lock(writeQMutex);
+
+            systemStateLock.lock();
+            unordered_set<string> currentBackups(backups);
+            systemStateLock.unlock();
+
+            for (auto& backupAddress : currentBackups) {
+                writeQueue.push(WriteInfo(wr.key(), wr.value(),
+                                            backupAddress, replicateCount));
+                work.notify_one();
+            }
+
+            workDone.wait(lock, [&] {
+                return replicateCount == currentBackups.size();
+            });
+        } else {  // Parallel writes to new threads created on demand
+            int result = this->rpc_write(wr.key(), wr.value());
+            if (result != 0) {
+                printf("%s \t : Error : Failed to write to backups",
+                        __func__);
+            }
+        }
+
+        return;
     }
 };
 

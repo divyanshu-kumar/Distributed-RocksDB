@@ -16,4 +16,5 @@ const int backReadStalenessLimit = 10;
 enum Consistency {
     strong = 1,
     eventual = 2,
+    fast_acknowledge = 3,
 };

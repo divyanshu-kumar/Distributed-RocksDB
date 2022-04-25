@@ -276,7 +276,13 @@ int Client::run_application(int NUM_RUNS = 50) {
         string value;
         uint32_t key = (int)dist7(rng);
         
-        double writeTime = write_wrapper(key, write_data, Consistency::strong);
+        // Randomly decide on write consistency level 
+        // (Current config - 50% chance for guaranteed durable writes)
+        Consistency writeConsistency = ((int)dist7(rng) & 1) ? 
+                                            Consistency::fast_acknowledge : 
+                                            Consistency::strong;
+
+        double writeTime = write_wrapper(key, write_data, writeConsistency);
         writeTimes.push_back(make_pair(writeTime, key));
 
        

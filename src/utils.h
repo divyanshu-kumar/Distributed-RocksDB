@@ -51,10 +51,12 @@ int msleep(long msec) {
 }
 
 string getConsistencyString(Consistency consistency){
-    if(consistency == Consistency::strong)
-        return "strong";
-    else
-        return "eventual";
+    switch(consistency) {
+        case Consistency::strong            : return "strong";
+        case Consistency::eventual          : return "eventual";
+        case Consistency::fast_acknowledge  : return "fast_acknowledge";
+        default                             : return "strong";
+    }
 }
 
 bool isRoleValid(const string &role) {
