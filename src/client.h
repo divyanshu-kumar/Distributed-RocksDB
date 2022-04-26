@@ -10,7 +10,7 @@ using grpc::Status;
 using namespace DistributedRocksDB;
 using namespace std;
 
-const int MAX_NUM_RETRIES = 5;
+const int MAX_NUM_RETRIES = 3;
 const int INITIAL_BACKOFF_MS = 1000;
 const int MULTIPLIER = 2;
 
