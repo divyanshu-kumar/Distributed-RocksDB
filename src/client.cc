@@ -38,7 +38,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
     int numRetriesDone = 0;
 
     do {
-        ServerInfo* serverToContact = getServerToContact(consistency, false);
+        ServerInfo* serverToContact = getServerToContact(key, consistency, false);
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Contacting server "
                  << serverToContact->address << endl;
@@ -83,7 +83,7 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
     int numRetriesDone = 0;
 
     do {
-        ServerInfo* serverToContact = getServerToContact(consistency, true);
+        ServerInfo* serverToContact = getServerToContact(key, consistency, true);
         if (debugMode <= DebugLevel::LevelInfo) {
              cout << __func__ << "\t : Contacting server "
                  << serverToContact->address << endl;
@@ -178,7 +178,7 @@ int main(int argc, char *argv[]) {
             std::quick_exit( EXIT_SUCCESS );
         }
 
-        string clientArg = parseArgument(argumentString, "--numClients=");
+        string clientArg = parseArgument(argumentString, "--num_clients=");
         if (!clientArg.empty()) {
             int numClientsPassed = stoi(clientArg);
             if (numClientsPassed > 0 && numClientsPassed < 1000) {

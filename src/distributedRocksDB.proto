@@ -43,6 +43,7 @@ message Heartbeat {
 
 message RegisterRequest {
     string address = 1;
+    int32 clusterid = 2;
 }
 
 message RegisterResult {
@@ -56,6 +57,11 @@ message SystemStateRequest {
 message SystemState {
     string primary = 1;
     repeated string backups = 2;
+    int32 keyrange = 3;
+}
+
+message SystemStateResult {
+    repeated SystemState systemstate = 1;
 }
 
 message TxnFlushRequest {
@@ -73,7 +79,9 @@ service DistributedRocksDBService {
     rpc rpc_subscribeForNotifications(SubscribeForNotifications) returns (stream ClientCacheNotify) {}
     rpc rpc_unSubscribeForNotifications(SubscribeForNotifications) returns (SubscribeForNotifications) {}
     rpc rpc_heartbeat(stream SystemState) returns (Heartbeat) {}
+    rpc rpc_clusterHeartbeat(stream SystemStateResult) returns (Heartbeat) {}
     rpc rpc_registerNewNode(RegisterRequest) returns (RegisterResult) {}
     rpc rpc_getSystemState(SystemStateRequest) returns (SystemState) {}
+    rpc rpc_getClusterSystemState(SystemStateRequest) returns (SystemStateResult) {}
     rpc rpc_flush(TxnFlushRequest) returns (TxnFlushReply) {}
 }

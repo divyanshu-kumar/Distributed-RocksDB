@@ -269,20 +269,33 @@ void CacheInfo::cacheData(const string &data) {
     get_time(&lastRefreshTs);
 }
 
+class ClusterState {
+    public:
+    mutex systemStateLock;
+    string primaryAddress;
+    unordered_set<string> backupAddresses;
+
+    ClusterState() {}
+
+    ClusterState& operator=(const ClusterState& state) {
+        primaryAddress = state.primaryAddress;
+        backupAddresses = state.backupAddresses;
+        return *this;
+    }
+};
+
 class Client {
 
 public:
-    string clientIdentifier;
-    std::thread notificationThread;
-    int clientThreadId;
-    unordered_map<string, ServerInfo*> serverInfos;
-    string primaryAddress;
-    unordered_set<string> backupAddresses;
-    std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_;
-    mutex systemStateLock;
-
-    unordered_map<int, CacheInfo> cacheMap;
     bool readFromBackup, isCachingEnabled;
+    int clientThreadId;
+    map<int, ClusterState> clusterInfo;
+    mutex clusterInfoLock;
+    string clientIdentifier;
+    unordered_map<int, CacheInfo> cacheMap;
+    unordered_map<string, ServerInfo*> serverInfos;
+    unordered_map<int, std::thread> notificationThread;
+    unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_;
 
     Client(string coordinatorAddress, bool cachingEnabled, int threadId, 
                 bool isReadFromBackup = false) 
@@ -307,18 +320,28 @@ public:
     int client_write(uint32_t key, const string &value, Consistency consistency);
     double write_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
 
-    string selectBackupServerForRead(){
-        lock_guard<mutex> guard(systemStateLock);
-        int size = backupAddresses.size();
+    int getClusterIdForKey(int key) {
+        lock_guard<mutex> lock(clusterInfoLock);
+        int hash = key % NUM_MAX_CLUSTERS;
+        auto it = clusterInfo.upper_bound(hash);
+        if (it == clusterInfo.end()) {
+            return clusterInfo.begin()->first;
+        }
+        return it->first;
+    }
+    string selectBackupServerForRead(int clusterId) {
+        lock_guard<mutex> guard(clusterInfo[clusterId].systemStateLock);
+        int size = clusterInfo[clusterId].backupAddresses.size();
         std::random_device dev;
         std::mt19937 rng(dev());
         std::uniform_int_distribution<std::mt19937::result_type> dist6(0, size-1);
-        return *(std::next(std::begin(backupAddresses), (int)dist6(rng)));
+        return *(std::next(std::begin(clusterInfo[clusterId].backupAddresses), (int)dist6(rng)));
     }
 
-    ServerInfo* getServerToContact(Consistency consistency, bool isWriteRequest){        
-        if(!isWriteRequest && consistency == Consistency::eventual && !backupAddresses.empty()){
-            string backupAddress = selectBackupServerForRead();
+    ServerInfo* getServerToContact(int key, Consistency consistency, bool isWriteRequest){
+        int clusterId = getClusterIdForKey(key);
+        if(!isWriteRequest && consistency == Consistency::eventual && !clusterInfo[clusterId].backupAddresses.empty()){
+            string backupAddress = selectBackupServerForRead(clusterId);
             if (debugMode <= DebugLevel::LevelInfo) {
                 cout << __func__ << "selecting server "<< backupAddress << endl;
             }
@@ -329,9 +352,10 @@ public:
             }
             return serverInfos[backupAddress];          
         }
-        systemStateLock.lock();
-        const string primary(primaryAddress);
-        systemStateLock.unlock();
+
+        clusterInfo[clusterId].systemStateLock.lock();
+        const string primary(clusterInfo[clusterId].primaryAddress);
+        clusterInfo[clusterId].systemStateLock.unlock();
 
         if(serverInfos.find(primary) == serverInfos.end()){
                 cout << "ERR: No server info for primary address " << primary << endl;
@@ -343,8 +367,12 @@ public:
         return serverInfos[primary];
     }
 
-    void initServerInfo(vector<string> newAddresses, const bool &needNotificationThread) {
-        for (string address : newAddresses) {
+    void initServerInfo(const string &primary,
+                        const vector<string> &newAddresses, 
+                        const int keyRange, 
+                        const bool &needNotificationThread) {
+
+        for (const string &address : newAddresses) {
             if (debugMode <= DebugLevel::LevelInfo) {
                 cout << __func__ << "\t : create gRPC Connection for " << address << endl; 
             }
@@ -354,75 +382,92 @@ public:
                 serverInfos[address] = new ServerInfo(address);
         }
         if(needNotificationThread){
-            // TODO: Cache notification thread is crashing. Currently disabled temporarily
-            notificationThread = (std::thread(cacheInvalidationListener, (serverInfos[primaryAddress]),
+            notificationThread[keyRange] = (std::thread(cacheInvalidationListener, (serverInfos[primary]),
                                               isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
             msleep(1);
         }
     }
 
 
-    void updateSystemState(const SystemState &systemStateMsg){
-        lock_guard<mutex> guard(systemStateLock);
-        
-        if(systemStateMsg.primary().empty()){
-            cout << __func__ << "\t : No primary server received from Coordinator " 
-                   " Exiting.... " << endl;
-            std::quick_exit( EXIT_SUCCESS );
-        }
-        
-        // newAddresses stores the addresses whose gRPC connection is to be created
-        vector<string> newAddresses;  
-        unordered_set<string> receivedBackupAddresses;
+    void updateSystemState(const SystemStateResult &systemStateMsg){
+        lock_guard<mutex> guard(clusterInfoLock);
+        std::map<int, ClusterState> newClusterInfo;
 
-        // Add only the addresses seen for first time in backups
-        for (auto address : systemStateMsg.backups()) {
-            if(backupAddresses.find(address) == backupAddresses.end()){
-                if (debugMode <= DebugLevel::LevelInfo) {
-                    cout << __func__ << "\t : adding new Backup Address " << address << endl;
-                }
-                backupAddresses.insert(address);
-                newAddresses.push_back(address);
+        for (auto &systemState : systemStateMsg.systemstate()) {
+            ClusterState state;
+            state.primaryAddress = systemState.primary();
+            for (auto &backup : systemState.backups()) {
+                state.backupAddresses.insert(backup);
             }
-            receivedBackupAddresses.insert(address);
+            newClusterInfo[(int)systemState.keyrange()] = state;
         }
-        unordered_set<string> tempSet(backupAddresses);
-        // remove the addresses & connection that are not sent by coordinator
-        for(auto address : tempSet){
-            if(receivedBackupAddresses.find(address) == receivedBackupAddresses.end()){
-                
-                if(!primaryAddress.empty() && address == systemStateMsg.primary()){
+
+        for (auto &state : newClusterInfo) {
+            const int keyRange = state.first;
+            const string &primary = state.second.primaryAddress;
+            const auto &backups = state.second.backupAddresses;
+
+            if(primary.empty()) {
+                cout << __func__ << "\t : No primary server received from Coordinator for keyRange " 
+                    << keyRange << ". Exiting.... " << endl;
+                std::quick_exit( EXIT_SUCCESS );
+            }
+            
+            // newAddresses stores the addresses whose gRPC connection is to be created
+            vector<string> newAddresses;  
+            unordered_set<string> receivedBackupAddresses;
+
+            // Add only the addresses seen for first time in backups
+            for (auto &address : backups) {
+                if(clusterInfo[keyRange].backupAddresses.find(address) == clusterInfo[keyRange].backupAddresses.end()){
                     if (debugMode <= DebugLevel::LevelInfo) {
-                        cout << __func__ << "\t : removing Address in backups " << address << endl;
+                        cout << __func__ << "\t : adding new Backup Address " << address << endl;
                     }
-                    backupAddresses.erase(address);
-                } else {
-                    if (debugMode <= DebugLevel::LevelInfo) {
-                        cout << __func__ << "\t : removing from backups & removing gRPC connection address: " << address << endl;
+                    clusterInfo[keyRange].backupAddresses.insert(address);
+                    newAddresses.push_back(address);
+                }
+                receivedBackupAddresses.insert(address);
+            }
+            unordered_set<string> tempSet(clusterInfo[keyRange].backupAddresses);
+            // remove the addresses & connection that are not sent by coordinator
+            for(auto address : tempSet){
+                if(receivedBackupAddresses.find(address) == receivedBackupAddresses.end()){
+                    
+                    if(!clusterInfo[keyRange].primaryAddress.empty() && address == primary){
+                        if (debugMode <= DebugLevel::LevelInfo) {
+                            cout << __func__ << "\t : removing Address in backups " << address << endl;
+                        }
+                        clusterInfo[keyRange].backupAddresses.erase(address);
+                    } else {
+                        if (debugMode <= DebugLevel::LevelInfo) {
+                            cout << __func__ << "\t : removing from backups & removing gRPC connection address: " << address << endl;
+                        }
+                        clusterInfo[keyRange].backupAddresses.erase(address);
+                        serverInfos.erase(address);
                     }
-                    backupAddresses.erase(address);
-                    serverInfos.erase(address);
                 }
             }
-        }
-        bool needNotificationThread = true;
-        if(primaryAddress == systemStateMsg.primary()){
-            needNotificationThread = false;
-        }
-        primaryAddress = systemStateMsg.primary();
 
-         if(serverInfos.find(primaryAddress) == serverInfos.end()){
-            newAddresses.push_back(primaryAddress);
-        }
-
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Updated Primary Address as " << primaryAddress << endl;
-            for(auto address : backupAddresses){
-                cout << __func__ << "\t : Backup contains " << address << endl;
+            bool needNotificationThread = true;
+            if(clusterInfo[keyRange].primaryAddress == primary){
+                needNotificationThread = false;
             }
+
+            clusterInfo[keyRange].primaryAddress = primary;
+
+            if(serverInfos.find(primary) == serverInfos.end()){
+                newAddresses.push_back(primary);
+            }
+
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Updated Primary Address as " << primary << " for range " << keyRange << endl;
+                for(auto &address : backups){
+                    cout << __func__ << "\t : Key = " << keyRange << ", Backup contains " << address << endl;
+                }
+            }
+            
+            initServerInfo(primary, newAddresses, keyRange, needNotificationThread);
         }
-        
-        initServerInfo(newAddresses, needNotificationThread);
     }
 
     int getSystemState(){
@@ -435,7 +480,7 @@ public:
         int error_code = 0;
         ClientContext clientContext;
         SystemStateRequest systemStateRequest;
-        SystemState systemStateReply;
+        SystemStateResult systemStateReply;
 
         while (!isDone) {
             
@@ -449,7 +494,7 @@ public:
             clientContext.set_wait_for_ready(true);
             clientContext.set_deadline(deadline);
 
-            Status status = coordinator_stub_->rpc_getSystemState(&clientContext, systemStateRequest, &systemStateReply);
+            Status status = coordinator_stub_->rpc_getClusterSystemState(&clientContext, systemStateRequest, &systemStateReply);
             // TODO add error code in SystemStateReply for coordinator
             error_code = status.error_code();
             currentBackoff *= MULTIPLIER;
@@ -485,10 +530,11 @@ public:
     }
 
     ~Client() {
-        // TODO: currently notification thread is disabled, as its crashing. Check this
-        if(serverInfos.find(primaryAddress) != serverInfos.end())
-            (serverInfos[primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
-        notificationThread.join();
+        for (auto &state : clusterInfo) {
+            if(serverInfos.find(state.second.primaryAddress) != serverInfos.end())
+                (serverInfos[state.second.primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
+            notificationThread[state.first].join();
+        }
         for (auto iter = serverInfos.begin(); iter != serverInfos.end(); ++iter) {
             delete iter->second;
         }

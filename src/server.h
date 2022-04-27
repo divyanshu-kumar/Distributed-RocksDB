@@ -158,7 +158,8 @@ class ServerReplication final : public DistributedRocksDBService::Service {
    public:
     ReadCache readCache;
 
-    ServerReplication(TxnManager *_tm) : threadPool(NUM_WORKER_THREADS) {
+    ServerReplication(TxnManager *_tm, int cluster_id) 
+        : threadPool(NUM_WORKER_THREADS), clusterId(cluster_id) {
         tm = _tm;
         // sometimes old values are cached, faced in P3, so needed
         stubs.clear();
@@ -400,6 +401,30 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         return Status::OK;
     }
 
+    Status rpc_clusterHeartbeat(ServerContext* context,
+                         ServerReader<SystemStateResult>* reader,
+                         Heartbeat* response) override {
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << endl;
+        }
+
+        SystemStateResult systemStateMsg;
+
+        while (reader->Read(&systemStateMsg)) {
+            vector<SystemState> clusterState;
+
+            for (auto state : systemStateMsg.systemstate()) {
+                clusterState.push_back(state);
+            }
+
+            updateSystemView(clusterState[clusterId]);
+        }
+
+        response->set_msg("OK");
+
+        return Status::OK;
+    }
+
     Status rpc_flush(ServerContext* context, const TxnFlushRequest* request, TxnFlushReply* reply) override {
         // No need to coordinate. Primary coordinates everything
         tm->flush();
@@ -427,6 +452,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     }
 
    private:
+    int clusterId;
     TxnManager *tm;
     mutex systemStateLock;
     string primaryAddress;
@@ -626,7 +652,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
 static ServerReplication* serverReplication;
 
-void registerServer() {
+void registerServer(int clusterId) {
     msleep(100);
 
     std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_(
@@ -649,6 +675,7 @@ void registerServer() {
         ClientContext ctx;
         RegisterRequest registerRequest;
         registerRequest.set_address(my_address);
+        registerRequest.set_clusterid(clusterId);
 
         std::chrono::system_clock::time_point deadline =
             std::chrono::system_clock::now() +

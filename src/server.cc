@@ -13,7 +13,7 @@ std::string kDBPath = "C:\\Windows\\TEMP\\rocksdb_distributed";
 std::string kDBPath = "/tmp/rocksdb/";
 #endif
 
-void RunServer() {
+void RunServer(int clusterId) {
     ServerBuilder builder;
 
     builder.AddListeningPort(my_address, grpc::InsecureServerCredentials());
@@ -24,7 +24,7 @@ void RunServer() {
 
     std::cout << "Server listening on " << my_address << std::endl;
 
-    std::thread registerThread(registerServer);
+    std::thread registerThread(registerServer, clusterId);
     registerThread.detach();
 
     server->Wait();
@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
     srand(time(NULL));
 
     string argumentString;
+    int clusterId;
 
     if (argc > 1) {
         for (int arg = 1; arg < argc; arg++) {
@@ -47,6 +48,14 @@ int main(int argc, char** argv) {
         
         my_address = parseArgument(argumentString, "--my_address=");
         coordinator_address = parseArgument(argumentString, "--coordinator_address=");
+        string clusterStr = parseArgument(argumentString, "--cluster_id=");
+
+        if (clusterStr.empty()) {
+            clusterId = 0;
+        }
+        else {
+            clusterId = stoi(clusterStr);
+        }
 
         // only for dev purpose, take default address of coordinator to be 0.0.0.0:50051
         if (coordinator_address.empty()) {
@@ -88,11 +97,11 @@ int main(int argc, char** argv) {
     // Recovery
     TxnManager *txn_manager = new TxnManager("/users/dkumar27/Distributed-RocksDB/logs");
 
-    serverReplication = new ServerReplication(txn_manager);
+    serverReplication = new ServerReplication(txn_manager, clusterId);
 
     backupLastWriteTime.clear();
     
-    RunServer();
+    RunServer(clusterId);
     // System State, TxnManager
     // 1. Server-Wait - thread
     // 2. Flush - No thread but, do on update System View
