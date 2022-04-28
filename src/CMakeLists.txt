@@ -80,7 +80,8 @@ endforeach()
 # Seperate them if dependencies changes
 foreach(_target
     coordinator
-    client)
+    client
+    clusterCoordinator)
     add_executable(${_target} "${_target}.cc")
     target_link_libraries(${_target}
         drdb_grpc_proto

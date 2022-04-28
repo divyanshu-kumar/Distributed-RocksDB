@@ -20,15 +20,15 @@ string getPrimaryAddress() {
 
     ClientContext clientContext;
     SystemStateRequest request;
-    SystemState reply;
+    SystemStateResult reply;
 
-    Status status = coordinator_stub_->rpc_getSystemState(&clientContext, request, &reply);
+    Status status = coordinator_stub_->rpc_getClusterSystemState(&clientContext, request, &reply);
 
     if (!status.ok()) {
         // Kill system
     }
 
-    return reply.primary();
+    return (reply.systemstate())[serverReplication->getClusterId()].primary();
 }
 
 void flush_recovery(RecoverReply reply) {
@@ -113,7 +113,7 @@ void RunRecovery() {
     Status status = stream->Finish();
 }
 
-void RunServer() {
+void RunServer(int clusterId) {
     ServerBuilder builder;
 
     builder.AddListeningPort(my_address, grpc::InsecureServerCredentials());
@@ -124,7 +124,7 @@ void RunServer() {
 
     std::cout << "Server listening on " << my_address << std::endl;
 
-    std::thread registerThread(registerServer);
+    std::thread registerThread(registerServer, clusterId);
     registerThread.detach();
 
     server->Wait();
@@ -138,6 +138,7 @@ int main(int argc, char** argv) {
     srand(time(NULL));
 
     string argumentString;
+    int clusterId;
 
     if (argc > 1) {
         for (int arg = 1; arg < argc; arg++) {
@@ -147,6 +148,14 @@ int main(int argc, char** argv) {
         
         my_address = parseArgument(argumentString, "--my_address=");
         coordinator_address = parseArgument(argumentString, "--coordinator_address=");
+        string clusterStr = parseArgument(argumentString, "--cluster_id=");
+
+        if (clusterStr.empty()) {
+            clusterId = 0;
+        }
+        else {
+            clusterId = stoi(clusterStr);
+        }
 
         // only for dev purpose, take default address of coordinator to be 0.0.0.0:50051
         if (coordinator_address.empty()) {
@@ -192,15 +201,15 @@ int main(int argc, char** argv) {
     sem_init(&sem_register, 0, 0);
     sem_init(&sem_recovery, 0, 0);
 
-    serverReplication = new ServerReplication();
+    serverReplication = new ServerReplication(clusterId);
 
-    backupLastWriteTime.clear();
-    
     // recovery thread
     std::thread recoveryThread(RunRecovery);
     recoveryThread.detach();
 
-    RunServer();
+    backupLastWriteTime.clear();
+    
+    RunServer(clusterId);
 
     delete serverReplication;
     delete db;
