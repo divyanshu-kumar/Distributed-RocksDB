@@ -63,24 +63,27 @@ struct WriteInfo {
         : key(k), value(val), address(addr), countSent(count) {}
 };
 struct NotificationInfo {
+    std::mutex clientStateLock;
     unordered_map<string, bool> subscriberShouldRun;
     unordered_map<int, unordered_set<string>> subscribedClients;
     unordered_map<string, ServerWriter<ClientCacheNotify>*> clientWriters;
     unordered_map<string, std::mutex> clientNotifyLocks;
 
-    void Subscribe(int address, const string& id) {
+    void Subscribe(int address, const string id) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : for address " << address << " id " << id
                  << " with role " << role << endl;
         }
+        lock_guard<mutex> lock(clientStateLock);
         subscribedClients[address].insert(id);
     }
 
-    void UnSubscribe(int address, const string& id) {
+    void UnSubscribe(int address, const string id) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : for address " << address << " id " << id
                  << " with role " << role << endl;
         }
+        lock_guard<mutex> lock(clientStateLock);
         subscribedClients[address].erase(id);
     }
 
@@ -90,6 +93,7 @@ struct NotificationInfo {
             cout << __func__ << "\t : Client " << clientId << " with role "
                  << role << endl;
         }
+        lock_guard<mutex> lock(clientStateLock);
         clientWriters[clientId] = clientWriter;
         subscriberShouldRun[clientId] = true;
     }
@@ -99,11 +103,13 @@ struct NotificationInfo {
             cout << __func__ << "\t : Client " << clientId << " with role "
                  << role << endl;
         }
+        lock_guard<mutex> lock(clientStateLock);
         clientWriters.erase(clientId);
         subscriberShouldRun[clientId] = false;
     }
 
     bool ShouldKeepAlive(const string& clientId) {
+        lock_guard<mutex> lock(clientStateLock);
         return subscriberShouldRun[clientId];
     }
 
@@ -112,7 +118,10 @@ struct NotificationInfo {
             cout << __func__ << "\t : Address " << address << " with role "
                  << role << endl;
         }
+        clientStateLock.lock();
         auto clientIds = subscribedClients[address];
+        clientStateLock.unlock();
+
         if (clientIds.empty()) {
             return;
         }
@@ -532,7 +541,9 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
 
     grpc::Status execFlushInReplica(string ip, std::unique_ptr<DistributedRocksDBService::Stub> *stub) {
-        cout << "[INFO]: Flush-START for ip:" << ip << endl;
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Flush-START for ip:" << ip << endl;
+        }
 
         ClientContext context;
         TxnFlushRequest request;
@@ -542,12 +553,18 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         grpc::Status status = (*stub)->rpc_flush(&context, request, &reply);
 
         if (status.ok()) {
-            cout << "[INFO]: flush success at ip:" << ip << endl;
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Flush success at ip:" << ip << endl;
+            }
         } else {
-            cout << "[INFO]: flush failed at ip:" << ip << endl;
+            if (debugMode <= DebugLevel::LevelError) {
+                cout << __func__ << "\t : Flush failed at ip:" << ip << endl;
+            }
         }
 
-        cout << "[INFO]: Flush-END for ip:" << ip << endl;
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Flush-END for ip:" << ip << endl;
+        }
 
         return status;
     }
@@ -577,7 +594,11 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
 
         tm->flush();
-        cout << "[INFO]: flushes done" << endl;
+
+
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Flushes done" << endl;
+        }
     }
 
     void updateSystemView(SystemState systemStateMsg) {
