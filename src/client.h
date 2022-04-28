@@ -494,7 +494,7 @@ public:
             clientContext.set_wait_for_ready(true);
             clientContext.set_deadline(deadline);
 
-            Status status = coordinator_stub_->rpc_getClusterSystemState(&clientContext, systemStateRequest, &systemStateReply);
+            Status status = coordinator_stub_->rpc_getSystemState(&clientContext, systemStateRequest, &systemStateReply);
             // TODO add error code in SystemStateReply for coordinator
             error_code = status.error_code();
             currentBackoff *= MULTIPLIER;

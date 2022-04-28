@@ -22,7 +22,7 @@ string getPrimaryAddress() {
     SystemStateRequest request;
     SystemStateResult reply;
 
-    Status status = coordinator_stub_->rpc_getClusterSystemState(&clientContext, request, &reply);
+    Status status = coordinator_stub_->rpc_getSystemState(&clientContext, request, &reply);
 
     if (!status.ok()) {
         // Kill system
@@ -130,10 +130,24 @@ void RunServer(int clusterId) {
     server->Wait();
 }
 
+void handler(int sig) {
+    void *array[10];
+    size_t size;
+
+    // get void*'s for all entries on the stack
+    size = backtrace(array, 10);
+
+    // print out all the frames to stderr
+    fprintf(stderr, "Error: signal %d:\n", sig);
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+    exit(1);
+}
+
 int main(int argc, char** argv) {
-    // ios::sync_with_stdio(true);
-    // cin.tie(nullptr);
-    // cout.tie(nullptr);
+    signal(SIGSEGV, handler);
+    ios::sync_with_stdio(true);
+    cin.tie(nullptr);
+    cout.tie(nullptr);
     
     srand(time(NULL));
 
@@ -179,6 +193,8 @@ int main(int argc, char** argv) {
     }
 
     cout << "\nMy Address = " << my_address << ", Coordinator Address = " << coordinator_address << endl;
+
+    system(string("mkdir -p " + kDBPath).c_str());
 
     kDBPath = kDBPath + my_address;
     storage_path = kDBPath + "/logs";

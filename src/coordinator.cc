@@ -10,7 +10,7 @@ void RunServer()
 
     builder.AddListeningPort(my_address, grpc::InsecureServerCredentials());
 
-    builder.RegisterService(coordinator);
+    builder.RegisterService(masterCoordinator);
 
     std::unique_ptr<Server> server(builder.BuildAndStart());
 
@@ -26,6 +26,9 @@ int main(int argc, char** argv)
     cout.tie(nullptr);
 
     string argumentString;
+    string numClustersArg;
+
+    int numClusters = 1;
 
     if (argc > 1) {
         for (int arg = 1; arg < argc; arg++) {
@@ -34,10 +37,23 @@ int main(int argc, char** argv)
         }
 
         my_address = parseArgument(argumentString, "--my_address=");
+        numClustersArg = parseArgument(argumentString, "--num_clusters=");
 
         if (!isIPValid(my_address)) {
             cout << "\nMy Address = " << my_address << endl;
             my_address = "";
+        }
+
+        if (!numClustersArg.empty()) {
+            numClusters = stoi(numClustersArg);
+            if (numClusters <= 0 || numClusters > NUM_MAX_CLUSTERS) {
+                cout << __func__ << "\t : Clusters should be in the range of 1 to " 
+                     << NUM_MAX_CLUSTERS << ". Making it 1." << endl;
+                numClusters = 1;
+            }
+            else {
+                cout << __func__ << "\t : Num Clusters = " << numClusters << endl;
+            }
         }
     }
 
@@ -49,11 +65,11 @@ int main(int argc, char** argv)
 
     cout << "\nMy Address = " << my_address << endl;
 
-    coordinator = new Coordinator();
+    masterCoordinator = new MasterCoordinator(numClusters);
 
     RunServer();
 
-    delete coordinator;
+    delete masterCoordinator;
 
     return 0;
 }

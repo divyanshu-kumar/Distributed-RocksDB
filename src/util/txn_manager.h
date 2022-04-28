@@ -53,6 +53,7 @@ class TxnManager {
     private:
         // for locking put
         mutex outer_mutex;
+        mutex put_lock;
         std::shared_mutex flush_mutex;
         unordered_map<string, shared_mutex> mutices;
 

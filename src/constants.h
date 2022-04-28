@@ -1,7 +1,7 @@
 #include <string>
 
 enum DebugLevel { LevelInfo = 0, LevelError = 1, LevelNone = 2 };
-const DebugLevel debugMode = LevelInfo;
+const DebugLevel debugMode = LevelError;
 
 
 const int one_kb = 1024;

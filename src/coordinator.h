@@ -24,8 +24,9 @@ const int MULTIPLIER = 2;
 const int HEARTBEAT_FREQUENCY = 50;  // (ms)
 
 static string my_address;
-class Coordinator final : public DistributedRocksDBService::Service {
-   private:
+
+class ClusterCoordinator {
+    public:
     unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>>
         stubs;
     string primary;
@@ -55,62 +56,14 @@ class Coordinator final : public DistributedRocksDBService::Service {
             address.c_str(), grpc::InsecureChannelCredentials()));
 
         if (isPrimaryElected()) {
+            cout << __func__ << "\t : Primary is elected, making it a backup node." << endl;
             backups.insert(address);
         } else {
+            cout << __func__ << "\t : Primary is not elected, making it a primary node." << endl;
             setPrimary(address);
         }
 
-        std::thread heartbeatThread(&Coordinator::establishHeartbeat, this,
-                                    address);
-        heartbeatThread.detach();
-
         return true;
-    }
-
-    void establishHeartbeat(string address) {
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Address = " << address << endl;
-        }
-
-        ClientContext context;
-        Heartbeat heartbeatRes;
-
-        std::unique_ptr<ClientWriter<SystemState>> writer(
-            stubs[address]->rpc_heartbeat(&context, &heartbeatRes));
-
-        while (true) {
-            SystemState systemStateMsg;
-
-            getSystemState(systemStateMsg);
-
-            if (!writer->Write(systemStateMsg)) {
-                cout << __func__ << "\t : Heartbeat connection broken." << endl;
-                stubs.erase(address);
-                if (isPrimary(address)) {
-                    primary.clear();
-                    cout << __func__ << "\t : Starting primary election now."
-                         << endl;
-                    electPrimary();
-                }
-                else {
-                    backups.erase(address);
-                }
-                return;
-            }
-
-            msleep(HEARTBEAT_FREQUENCY);
-        }
-
-        writer->WritesDone();
-
-        Status status = writer->Finish();
-
-        if (!status.ok()) {
-            if (debugMode <= DebugLevel::LevelError) {
-                cout << __func__ << "\t : Status returned as "
-                     << status.error_message() << endl;
-            }
-        }
     }
 
     void electPrimary() {
@@ -136,6 +89,9 @@ class Coordinator final : public DistributedRocksDBService::Service {
 
     void getSystemState(SystemState &systemStateMsg) {
             lock_guard<mutex> guard(systemStateLock);
+            if (!isPrimaryElected()) {
+                return;
+            }
 
             systemStateMsg.set_primary(primary);
 
@@ -143,21 +99,111 @@ class Coordinator final : public DistributedRocksDBService::Service {
                 systemStateMsg.add_backups(backupAddress);
             }
     }
+};
+
+class MasterCoordinator final : public DistributedRocksDBService::Service {
+    int numClusters;
+    vector<int> keyRanges;
+    vector<ClusterCoordinator*> clusterCoordinators;
+
+    void establishHeartbeat(string address, int clusterId) {
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Address = " << address << endl;
+        }
+
+        ClientContext context;
+        Heartbeat heartbeatRes;
+
+        std::unique_ptr<ClientWriter<SystemStateResult>> writer(
+            clusterCoordinators[clusterId]->stubs[address]->rpc_heartbeat(&context, &heartbeatRes));
+
+        while (true) {
+            SystemStateResult clusterSystemState;
+
+            for (int cluster = 0; cluster < numClusters; cluster++) {
+                SystemState clusterReply;
+                clusterCoordinators[clusterId]->getSystemState(clusterReply);
+
+                SystemState *state = clusterSystemState.add_systemstate();
+                state->set_primary(clusterReply.primary());
+                state->set_keyrange(keyRanges[cluster]);
+                
+                for (auto &backup : clusterReply.backups()) {
+                    state->add_backups(backup);
+                }
+            }
+
+            if (!writer->Write(clusterSystemState)) {
+                cout << __func__ << "\t : Heartbeat connection broken." << endl;
+                clusterCoordinators[clusterId]->stubs.erase(address);
+                if (clusterCoordinators[clusterId]->isPrimary(address)) {
+                    clusterCoordinators[clusterId]->primary.clear();
+                    cout << __func__ << "\t : Starting primary election now."
+                         << endl;
+                    clusterCoordinators[clusterId]->electPrimary();
+                }
+                else {
+                    clusterCoordinators[clusterId]->backups.erase(address);
+                }
+                return;
+            }
+
+            msleep(HEARTBEAT_FREQUENCY);
+        }
+
+        writer->WritesDone();
+
+        Status status = writer->Finish();
+
+        if (!status.ok()) {
+            if (debugMode <= DebugLevel::LevelError) {
+                cout << __func__ << "\t : Status returned as "
+                     << status.error_message() << endl;
+            }
+        }
+    }
 
    public:
-    Coordinator() {}
+    MasterCoordinator(int num_clusters) :  
+        numClusters(num_clusters) {
+        int totalRange = NUM_MAX_CLUSTERS;
+        int singleClusterRange = totalRange / numClusters;
+        for (int i = 0; i < numClusters; i++) {
+            clusterCoordinators.push_back(new ClusterCoordinator());
+            keyRanges.push_back(singleClusterRange * (i + 1));
+        }
+    }
+
+    ~MasterCoordinator() {
+        for (int i = 0; i < numClusters; i++) {
+            delete clusterCoordinators[i];
+        }
+    }
 
     Status rpc_registerNewNode(ServerContext* context,
                                const RegisterRequest* rr,
                                RegisterResult* reply) override {
         const string& nodeAddress = rr->address();
+        const int clusterId = rr->clusterid();
 
-        bool result = addNode(nodeAddress);
+        if (clusterId < 0 || clusterId >= numClusters) {
+            cout << __func__ << "\t : INVALID_CLUSTER_ID " << endl;
+            reply->set_result("INVALID_CLUSTER_ID");
+            return Status::OK;
+        }
+
+        bool result = clusterCoordinators[clusterId]->addNode(nodeAddress);
+
+        std::thread heartbeatThread(&MasterCoordinator::establishHeartbeat, this,
+                                    nodeAddress, clusterId);
+        heartbeatThread.detach();
 
         if (result) {
-            reply->set_result((isPrimary(nodeAddress) ? "primary" : "backup"));
+            reply->set_result(
+                (clusterCoordinators[clusterId]->isPrimary(nodeAddress) ? "primary" : "backup")
+                );
             cout << __func__ << "\t : New node " << nodeAddress
-                 << " has joined the system with role as " << reply->result()
+                 << " has joined the cluster " << clusterId << " with role as " << reply->result()
                  << endl;
         }
 
@@ -165,13 +211,25 @@ class Coordinator final : public DistributedRocksDBService::Service {
     }
 
     Status rpc_getSystemState(ServerContext* context,
-                              const SystemStateRequest* wr,
-                              SystemState* reply) override {
+                              const SystemStateRequest* rr,
+                              SystemStateResult* reply) override {
         
-        getSystemState(*reply);
+        for (int cluster = 0; cluster < numClusters; cluster++) {
+            SystemState clusterReply;
+            clusterCoordinators[cluster]->getSystemState(clusterReply);
+
+            SystemState *state = reply->add_systemstate();
+            state->set_primary(clusterReply.primary());
+            state->set_keyrange(keyRanges[cluster]);
+
+            for (auto &backup : clusterReply.backups()) {
+                state->add_backups(backup);
+            }
+        }
 
         return Status::OK;
     }
 };
 
-static Coordinator* coordinator;
+static MasterCoordinator* masterCoordinator;
+

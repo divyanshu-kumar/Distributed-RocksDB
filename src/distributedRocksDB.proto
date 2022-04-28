@@ -105,11 +105,9 @@ service DistributedRocksDBService {
     rpc rpc_write(WriteRequest) returns (WriteResult) {}
     rpc rpc_subscribeForNotifications(SubscribeForNotifications) returns (stream ClientCacheNotify) {}
     rpc rpc_unSubscribeForNotifications(SubscribeForNotifications) returns (SubscribeForNotifications) {}
-    rpc rpc_heartbeat(stream SystemState) returns (Heartbeat) {}
-    rpc rpc_clusterHeartbeat(stream SystemStateResult) returns (Heartbeat) {}
+    rpc rpc_heartbeat(stream SystemStateResult) returns (Heartbeat) {}
     rpc rpc_registerNewNode(RegisterRequest) returns (RegisterResult) {}
-    rpc rpc_getSystemState(SystemStateRequest) returns (SystemState) {}
-    rpc rpc_getClusterSystemState(SystemStateRequest) returns (SystemStateResult) {}
+    rpc rpc_getSystemState(SystemStateRequest) returns (SystemStateResult) {}
     rpc rpc_flush(TxnFlushRequest) returns (TxnFlushReply) {}
     rpc rpc_recover(stream RecoverRequest) returns (stream RecoverReply) {}
 }

@@ -4,6 +4,8 @@
 #include "util/txn_manager.h"
 #include <future>
 #include <semaphore.h>
+#include <execinfo.h>
+#include <signal.h>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -203,6 +205,12 @@ class ServerReplication final : public DistributedRocksDBService::Service {
                  << " Backup Address: " << backupAddress << endl;
         }
 
+        if (stubs.find(backupAddress) == stubs.end()) {
+            cout << __func__ << " Backup Address : " << backupAddress 
+                 << " not found in stubs." << endl;
+            return;
+        }
+
         WriteResult wres;
         bool isDone = false;
         int numRetriesLeft = MAX_NUM_RETRIES;
@@ -397,24 +405,6 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     }
 
     Status rpc_heartbeat(ServerContext* context,
-                         ServerReader<SystemState>* reader,
-                         Heartbeat* response) override {
-        if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << endl;
-        }
-
-        SystemState systemStateMsg;
-
-        while (reader->Read(&systemStateMsg)) {
-            updateSystemView(systemStateMsg);
-        }
-
-        response->set_msg("OK");
-
-        return Status::OK;
-    }
-
-    Status rpc_clusterHeartbeat(ServerContext* context,
                          ServerReader<SystemStateResult>* reader,
                          Heartbeat* response) override {
         if (debugMode <= DebugLevel::LevelInfo) {
@@ -615,6 +605,11 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
         int i = 0;
         for (const auto& b: backups) {
+            if (stubs.find(b) == stubs.end()) {
+                cout << __func__ << " Backup Address : " << b 
+                    << " not found in stubs." << endl;
+                continue;
+            }
             flushes[i] = async(launch::async, &ServerReplication::execFlushInReplica, this, b, &stubs[b]);
             i++;
         }

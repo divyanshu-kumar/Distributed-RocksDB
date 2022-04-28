@@ -65,6 +65,8 @@ add_library(tm SHARED "util/txn_manager.cc")
 foreach(_target
     server )
     add_executable(${_target} "${_target}.cc")
+    add_compile_options("-g")
+    add_compile_options("-rdynamic")
     target_include_directories(${_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
     target_link_libraries(${_target}
         tm
@@ -79,9 +81,8 @@ endforeach()
 # Build Coordinator and Client
 # Seperate them if dependencies changes
 foreach(_target
-    coordinator
     client
-    clusterCoordinator)
+    coordinator)
     add_executable(${_target} "${_target}.cc")
     target_link_libraries(${_target}
         drdb_grpc_proto

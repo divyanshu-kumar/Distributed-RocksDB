@@ -51,6 +51,7 @@ TxnManager::TxnManager(string _storage_path) {
 }
 
 void TxnManager::put(string key, string value) {
+    lock_guard<mutex> lock(put_lock);
     txns.insert(make_pair(key, value));
 }
 
@@ -79,6 +80,7 @@ void TxnManager::flush() {
 
     // advance system to next log index
     lastLogIndex++;
+    lock_guard<mutex> lock(put_lock);
     txns.clear();
 }
 
@@ -112,9 +114,11 @@ vector<string> TxnManager::getTxnKeys(int logIndex) {
 
     // caller is asking for in memory keys
     if (logIndex == lastLogIndex + 1) {
+        put_lock.lock();
         for(auto it: txns) {
             keys.push_back(it.first);
         }
+        put_lock.unlock();
 
         return keys;
     }
@@ -127,8 +131,6 @@ vector<string> TxnManager::getTxnKeys(int logIndex) {
     while(logStream >> key) {
         keys.push_back(key);
     }
-
-    cout << keys.size() << endl;
 
     return keys;
 }
