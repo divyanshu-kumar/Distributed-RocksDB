@@ -3,6 +3,7 @@
 #include "distributedRocksDB.grpc.pb.h"
 #include "util/txn_manager.h"
 #include <future>
+#include <semaphore.h>
 
 using grpc::Channel;
 using grpc::ClientContext;
@@ -14,6 +15,7 @@ using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::ServerReader;
 using grpc::ServerReaderWriter;
+using grpc::ClientReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
 using grpc::StatusCode;
@@ -29,21 +31,25 @@ using namespace std;
 
 DB* db;
 
+// Constants
 const int MAX_NUM_RETRIES = 5;
 const int INITIAL_BACKOFF_MS = 100;
 const int MULTIPLIER = 2;
 const int NUM_WORKER_THREADS = 100;
-const int TXN_FLUSH_THRESHOLD = 100;
+const int TXN_FLUSH_THRESHOLD = 10;
 
 string currentWorkDir, dataDirPath, writeTxLogsDirPath;
 
 static string role, my_address, coordinator_address;
+string storage_path;
 
 static unordered_map<int, std::mutex> blockLock;
 unordered_map<int, struct timespec> backupLastWriteTime;
 
 bool crashTestingEnabled(false);
 bool writeThreadPoolEnabled(false);
+
+sem_t sem_recovery, sem_register;
 
 struct timespec* max_time(struct timespec* t1, struct timespec* t2);
 
@@ -149,10 +155,13 @@ class ServerReplication final : public DistributedRocksDBService::Service {
    public:
     ReadCache readCache;
 
-    ServerReplication(TxnManager *_tm) : threadPool(NUM_WORKER_THREADS) {
-        tm = _tm;
+    ServerReplication() : threadPool(NUM_WORKER_THREADS) {
         // sometimes old values are cached, faced in P3, so needed
         stubs.clear();
+    }
+
+    void set_tm(TxnManager *_tm) {
+        tm = _tm;
     }
 
     int rpc_write(uint32_t key, const string& value, const unordered_set<string> &currentBackups) {
@@ -252,19 +261,19 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         return Status::OK;
     }
 
-    void writeToDB(const WriteRequest *wr) {
+    void writeToDB(string key, string value) {
         // Common across Primary or Backup
         ROCKSDB_NAMESPACE::Status status =
-            db->Put(WriteOptions(), to_string(wr->key()), wr->value());
+            db->Put(WriteOptions(), key, value);
         assert(status.ok());
 
         if (debugMode <= DebugLevel::LevelInfo) {
-            cout << __func__ << "\t : Wrote Key " << wr->key() << endl;
+            cout << __func__ << "\t : Wrote Key " << key << endl;
         }
     }
 
     void execAsPrimary(const WriteRequest* wr, const unordered_set<string> &currentBackups) {
-        writeToDB(wr);
+        writeToDB(to_string(wr->key()), wr->value());
 
         if (wr->consistency() == getConsistencyString(Consistency::fast_acknowledge)) {
             std::thread asyncWriteThread(&ServerReplication::replicateToBackups, this, *wr, currentBackups);
@@ -277,7 +286,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     }
 
     void execAsReplica(const WriteRequest *wr) {
-        writeToDB(wr);
+        writeToDB(to_string(wr->key()), wr->value());
         tm->put(to_string(wr->key()), wr->value());
     }
 
@@ -394,6 +403,99 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     Status rpc_flush(ServerContext* context, const TxnFlushRequest* request, TxnFlushReply* reply) override {
         // No need to coordinate. Primary coordinates everything
         tm->flush();
+
+        return Status::OK;
+    }
+
+    vector<string> fetchKeys(int logIndex) {
+        return tm->getTxnKeys(logIndex);
+    }
+
+    RecoverReply getLogTxns(int fromIndex, int toIndex) {
+        unordered_set<string> keySet;
+
+        // 1. Fetch all the keys from the log - let the txns be going on
+        vector<future<vector<string>>> futures;
+
+        for(int i = fromIndex; i <= toIndex; i++) {
+            futures.push_back(async(launch::async, &ServerReplication::fetchKeys, this, i));
+        }
+
+        for(int i = 0; i < futures.size(); i++) {
+            vector<string> keys = futures[i].get();
+            std::copy(keys.begin(), keys.end(), std::inserter(keySet, keySet.end()));
+        }
+
+        // 2. Get corresponding values from DB and form a response
+        RecoverReply reply;
+        reply.set_logindex(toIndex);
+        reply.set_error(0);
+        reply.set_replytype(RecoveryReplyType::TXNS);
+
+        for(string key: keySet) {
+            string value;
+            int res = 0;
+
+            ROCKSDB_NAMESPACE::Status status =
+                db->Get(ReadOptions(), key, &value);
+            assert(status.ok() || status.IsNotFound());
+
+            Txn* txn = reply.add_txns();
+            txn->set_key(key);
+            txn->set_value(value);
+        }
+
+        return reply;
+    }
+
+    Status rpc_recover(ServerContext* context, ServerReaderWriter<RecoverReply, RecoverRequest>* stream) override {
+        RecoverRequest request;
+
+        if(!stream->Read(&request)) {
+            return Status::OK;
+        }
+
+        int fromLogIndex = request.lastlogindex();
+        int toLogIndex = tm->getLastLogIndex();
+        // 1. get all txns so far
+        RecoverReply reply = getLogTxns(fromLogIndex + 1, toLogIndex);
+
+        if(!stream->Write(reply)) {
+            return Status::OK;
+        }
+
+        // 2. While txns are being written at server, stop writes
+        lock_guard<mutex> guard(systemStateLock);
+        // lock global writes
+        tm->acquireFlushLockForFlush();
+
+        while(tm->getActiveTxnCount() != 0) {
+            msleep(1);
+        }
+
+        // 3. force flush
+        if (tm->getInMemoryTxnCount() != 0) {
+            flush();
+        }
+        
+
+        // 4. If there were new logs written, then send them too
+        int currLastLogIndex = tm->getLastLogIndex();
+        if (currLastLogIndex > toLogIndex) {
+            reply = getLogTxns(toLogIndex + 1, currLastLogIndex);
+            if(!stream->Write(reply)) {
+                return Status::OK;
+            }
+        }
+
+        // 5. wait for it to send REG_DONE. We don't care if the connection fails at this point
+        reply.set_replytype(RecoveryReplyType::TXNS_DONE);
+        stream->Write(reply);
+
+        stream->Read(&request);
+
+        // unlock global writes
+        tm->releaseFlushLockForFlush();
 
         return Status::OK;
     }
@@ -606,6 +708,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 static ServerReplication* serverReplication;
 
 void registerServer() {
+    // TODO: Hemal needed?
     msleep(100);
 
     std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_(
@@ -623,6 +726,11 @@ void registerServer() {
     int numRetriesLeft = MAX_NUM_RETRIES;
     unsigned int currentBackoff = INITIAL_BACKOFF_MS;
     int error_code = 0;
+
+    cout << "[INFO-Register-Wait]: waiting for recovery" << endl;
+    sem_wait(&sem_recovery);
+    cout << "[INFO-Register]: recovery done" << endl;
+    
 
     while (!isDone) {
         ClientContext ctx;
@@ -644,6 +752,11 @@ void registerServer() {
         if (status.error_code() == grpc::StatusCode::OK ||
             numRetriesLeft-- == 0) {
             isDone = true;
+            cout << "[INFO-Register]: register done" << endl;
+            // recovery is waiting for this signal
+            sem_post(&sem_register);
+
+            serverReplication->set_tm(new TxnManager(storage_path));
         } else {
             if (debugMode <= DebugLevel::LevelInfo) {
                 printf("%s \t : Timed out to contact coordinator server.\n",

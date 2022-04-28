@@ -14,6 +14,41 @@
 
 using namespace std;
 
+const std::string LOG_PREFIX = std::string("self.log.");
+
+string computeLogPath(string storage_path, int logIndex) {
+    return storage_path + "/" + LOG_PREFIX + to_string(logIndex);
+}
+
+int extractLogIndex(char* _fileName) {
+    string fileName(_fileName);
+    int index = stoi(fileName.substr(LOG_PREFIX.size()));
+
+    return index;
+}
+
+int computeLastLogIndex(string storage_path) {
+    DIR *dir = opendir(storage_path.c_str());
+    struct dirent *dirEnt;
+    int last = -1;
+
+    if (dir) {
+        while ((dirEnt = readdir(dir)) != NULL) {
+            if (strcmp(dirEnt->d_name, ".") == 0 || strcmp(dirEnt->d_name, "..") == 0) {
+                continue;
+            }
+
+            int index = extractLogIndex(dirEnt->d_name);
+            if (index > last) {
+                last = index;
+            }
+        }
+        closedir(dir);
+    }
+
+    return last;
+}
+
 class TxnManager {
     private:
         // for locking put
@@ -26,7 +61,6 @@ class TxnManager {
         unordered_map<string,string> txns;
         string storage_path;
         int lastLogIndex;
-        const string LOG_PREFIX = string("self.log.");
 
         /**
          * @brief extract log index from the given file name in logs directory
@@ -35,23 +69,6 @@ class TxnManager {
          * @return int 
          */
         int extractLogIndex(char* _fileName);
-
-        /**
-         * @brief should be used during the instantiation of this class
-         * figures out the last stored log index
-         * 
-         * @return int 
-         */
-        int computeLastLogIndex();
-
-        /**
-         * @brief computes log path to flush txns
-         * 
-         * @param logIndex 
-         * @return string 
-         */
-        string computeLogPath(int logIndex);
-
 
     public:
         /**

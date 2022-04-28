@@ -2,38 +2,34 @@
 #include <future>
 #include <chrono>
 
-int TxnManager::extractLogIndex(char* _fileName) {
-    string fileName(_fileName);
-    int index = stoi(fileName.substr(LOG_PREFIX.size()));
+// int TxnManager::extractLogIndex(char* _fileName) {
+//     string fileName(_fileName);
+//     int index = stoi(fileName.substr(LOG_PREFIX.size()));
 
-    return index;
-}
+//     return index;
+// }
 
-int TxnManager::computeLastLogIndex() {
-    DIR *dir = opendir(storage_path.c_str());
-    struct dirent *dirEnt;
-    int last = -1;
+// int TxnManager::computeLastLogIndex() {
+//     DIR *dir = opendir(storage_path.c_str());
+//     struct dirent *dirEnt;
+//     int last = -1;
 
-    if (dir) {
-        while ((dirEnt = readdir(dir)) != NULL) {
-            if (strcmp(dirEnt->d_name, ".") == 0 || strcmp(dirEnt->d_name, "..") == 0) {
-                continue;
-            }
+//     if (dir) {
+//         while ((dirEnt = readdir(dir)) != NULL) {
+//             if (strcmp(dirEnt->d_name, ".") == 0 || strcmp(dirEnt->d_name, "..") == 0) {
+//                 continue;
+//             }
 
-            int index = extractLogIndex(dirEnt->d_name);
-            if (index > last) {
-                last = index;
-            }
-        }
-        closedir(dir);
-    }
+//             int index = extractLogIndex(dirEnt->d_name);
+//             if (index > last) {
+//                 last = index;
+//             }
+//         }
+//         closedir(dir);
+//     }
 
-    return last;
-}
-
-string TxnManager::computeLogPath(int logIndex) {
-    return storage_path + "/" + LOG_PREFIX + to_string(logIndex);
-}
+//     return last;
+// }
 
 unique_lock<shared_mutex> TxnManager::getPutLock(string key) {
     outer_mutex.lock();
@@ -51,7 +47,7 @@ void TxnManager::releasePutLock(unique_lock<shared_mutex>& key_mutex)
 TxnManager::TxnManager(string _storage_path) {
     storage_path = _storage_path;
     txns.clear();
-    lastLogIndex = computeLastLogIndex();
+    lastLogIndex = computeLastLogIndex(storage_path);
 }
 
 void TxnManager::put(string key, string value) {
@@ -69,7 +65,7 @@ string TxnManager::get(string key) {
 }
 
 void TxnManager::flush() {
-    string logPath = computeLogPath(lastLogIndex + 1);
+    string logPath = computeLogPath(storage_path, lastLogIndex + 1);
 
     vector<std::string> keys;
 
@@ -123,7 +119,7 @@ vector<string> TxnManager::getTxnKeys(int logIndex) {
         return keys;
     }
 
-    string logPath = computeLogPath(logIndex);
+    string logPath = computeLogPath(storage_path, logIndex);
 
     ifstream logStream(logPath);
     string key;
@@ -220,19 +216,22 @@ void testTxnCount(TxnManager *tm) {
 int main() {
     TxnManager *tm = new TxnManager("/users/dkumar27/Distributed-RocksDB/logs");
 
-    auto begin = chrono::high_resolution_clock::now();
-    testMultiThreadDiff(tm);
-    auto end = chrono::high_resolution_clock::now();
-    uint64_t time_taken = chrono::duration_cast<chrono::nanoseconds> (end - begin).count();
-    cout << "time_taken[DIff]:" << time_taken << endl;
+    // auto begin = chrono::high_resolution_clock::now();
+    // testMultiThreadDiff(tm);
+    // auto end = chrono::high_resolution_clock::now();
+    // uint64_t time_taken = chrono::duration_cast<chrono::nanoseconds> (end - begin).count();
+    // cout << "time_taken[DIff]:" << time_taken << endl;
 
-    begin = chrono::high_resolution_clock::now();
-    testMultiThreadSame(tm);
-    end = chrono::high_resolution_clock::now();
-    time_taken = chrono::duration_cast<chrono::nanoseconds> (end - begin).count();
-    cout << "time_taken[Same]:" << time_taken << endl;
+    // begin = chrono::high_resolution_clock::now();
+    // testMultiThreadSame(tm);
+    // end = chrono::high_resolution_clock::now();
+    // time_taken = chrono::duration_cast<chrono::nanoseconds> (end - begin).count();
+    // cout << "time_taken[Same]:" << time_taken << endl;
 
-    testTxnCount(tm);
+    // testTxnCount(tm);
+
+    vector<string> keys = tm->getTxnKeys(200);
+    cout << "keys:" << keys.size() << endl;
 
 
     // tm.put("hello1", "world1");

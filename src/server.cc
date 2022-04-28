@@ -13,6 +13,106 @@ std::string kDBPath = "C:\\Windows\\TEMP\\rocksdb_distributed";
 std::string kDBPath = "/tmp/rocksdb/";
 #endif
 
+string getPrimaryAddress() {
+    std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_(
+        DistributedRocksDBService::NewStub(grpc::CreateChannel(
+            coordinator_address.c_str(), grpc::InsecureChannelCredentials())));
+
+    ClientContext clientContext;
+    SystemStateRequest request;
+    SystemState reply;
+
+    Status status = coordinator_stub_->rpc_getSystemState(&clientContext, request, &reply);
+
+    if (!status.ok()) {
+        // Kill system
+    }
+
+    return reply.primary();
+}
+
+void flush_recovery(RecoverReply reply) {
+    string logPath = computeLogPath(storage_path, reply.logindex());
+
+    vector<std::string> keys;
+
+    for(auto txn: reply.txns()) {
+        keys.push_back(txn.key());
+    }
+
+    ofstream logFile(logPath);
+    ostream_iterator<string> output_iterator(logFile, "\n");
+    copy(keys.begin(), keys.end(), output_iterator);
+}
+
+void dumpToDB(RecoverReply reply) {
+    for(auto txn: reply.txns()) {
+        serverReplication->writeToDB(txn.key(), txn.value());
+    }
+}
+
+void RunRecovery() {
+    // 1. Get primary address from the coordinator
+    string primary_addr = getPrimaryAddress();
+
+    // if there is no primary then this is the first server
+    if (primary_addr.empty()) {
+        sem_post(&sem_recovery);
+        cout << "[INFO:RunRecovery]: recovery done" << endl;
+
+        // no need to wait for register as well
+        return;
+    }
+
+    std::unique_ptr<DistributedRocksDBService::Stub> primary_stub_(
+        DistributedRocksDBService::NewStub(grpc::CreateChannel(
+            primary_addr.c_str(), grpc::InsecureChannelCredentials())));
+
+    // 2. contact primary for logs
+    ClientContext context;
+    std::shared_ptr<ClientReaderWriter<RecoverRequest, RecoverReply> > stream(
+            primary_stub_->rpc_recover(&context));
+    
+    RecoverRequest request;
+    RecoverReply reply;
+    int lastLogIndex = computeLastLogIndex(storage_path);
+
+    request.set_reqtype(RecoveryRequestType::GET_TXNS);
+    request.set_lastlogindex(lastLogIndex);
+
+    stream->Write(request);
+
+    while(1) {
+        stream->Read(&reply);
+
+        if (reply.replytype() == RecoveryReplyType::TXNS_DONE) {
+            break;
+        }
+
+        // write to DB
+        dumpToDB(reply);
+
+         // flush custom
+        flush_recovery(reply);
+    }
+
+    // 3. sem signal recovery done
+    sem_post(&sem_recovery);
+    cout << "[INFO:RunRecovery]: recovery done" << endl;
+
+    // 4. wait for register
+    cout << "[INFO-RunRecover]: waiting for register" << endl;
+    sem_wait(&sem_register);
+    cout << "[INFO-RunRecovery]: register done" << endl;
+
+    // 5. tell primary that I am up
+    request.set_reqtype(RecoveryRequestType::REG_DONE);
+    stream->Write(request);
+
+    stream->WritesDone();
+    Status status = stream->Finish();
+}
+
 void RunServer() {
     ServerBuilder builder;
 
@@ -31,9 +131,9 @@ void RunServer() {
 }
 
 int main(int argc, char** argv) {
-    ios::sync_with_stdio(false);
-    cin.tie(nullptr);
-    cout.tie(nullptr);
+    // ios::sync_with_stdio(true);
+    // cin.tie(nullptr);
+    // cout.tie(nullptr);
     
     srand(time(NULL));
 
@@ -72,6 +172,9 @@ int main(int argc, char** argv) {
     cout << "\nMy Address = " << my_address << ", Coordinator Address = " << coordinator_address << endl;
 
     kDBPath = kDBPath + my_address;
+    storage_path = kDBPath + "/logs";
+
+    system(string("mkdir -p " + storage_path).c_str());
 
     cout << "DB path = " << kDBPath << endl;
     Options options;
@@ -85,24 +188,24 @@ int main(int argc, char** argv) {
     ROCKSDB_NAMESPACE::Status s = DB::Open(options, kDBPath, &db);
     assert(s.ok());
 
-    // Recovery
-    TxnManager *txn_manager = new TxnManager("/users/dkumar27/Distributed-RocksDB/logs");
+    // sem inits
+    sem_init(&sem_register, 0, 0);
+    sem_init(&sem_recovery, 0, 0);
 
-    serverReplication = new ServerReplication(txn_manager);
+    serverReplication = new ServerReplication();
 
     backupLastWriteTime.clear();
     
+    // recovery thread
+    std::thread recoveryThread(RunRecovery);
+    recoveryThread.detach();
+
     RunServer();
-    // System State, TxnManager
-    // 1. Server-Wait - thread
-    // 2. Flush - No thread but, do on update System View
-    // 3. Prod-Cons - replication
 
-    // Server-Wait - join
-
-    delete txn_manager;
     delete serverReplication;
     delete db;
+    sem_destroy(&sem_register);
+    sem_destroy(&sem_recovery);
 
     return 0;
 }
