@@ -488,7 +488,7 @@ public:
         for (auto &state : clusterInfo) {
             if(serverInfos.find(state.second.primaryAddress) != serverInfos.end())
                 (serverInfos[state.second.primaryAddress]->connection)->rpc_unSubscribeForNotifications(clientIdentifier);
-            notificationThread[state.first].join();
+            // notificationThread[state.first].join();
         }
         for (auto iter = serverInfos.begin(); iter != serverInfos.end(); ++iter) {
             delete iter->second;
