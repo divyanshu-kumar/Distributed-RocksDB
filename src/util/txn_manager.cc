@@ -97,7 +97,7 @@ void TxnManager::decActiveTxnCount() {
 }
 
 uint32_t TxnManager::getActiveTxnCount() {
-    return active_txn_count.load();
+    return active_txn_count;
 }
 
 uint32_t TxnManager::getInMemoryTxnCount() {

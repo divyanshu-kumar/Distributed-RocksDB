@@ -36,6 +36,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
 
     int res = 0;
     int numRetriesDone = 0;
+    unsigned int currentBackoff = INITIAL_BACKOFF_MS;
 
     do {
         ServerInfo* serverToContact = getServerToContact(key, consistency, false);
@@ -44,7 +45,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
                  << serverToContact->address << endl;
         }
         res = (serverToContact->connection)->rpc_read(key, value, isCachingEnabled, 
-                  clientIdentifier, serverToContact->address, consistency);
+                  clientIdentifier, serverToContact->address, consistency, currentBackoff);
 
         if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
@@ -54,8 +55,9 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
             }
             getSystemState();
             numRetriesDone++;
+            currentBackoff *= MULTIPLIER;
         }
-    } while((res == SERVER_OFFLINE_ERROR_CODE) && (numRetriesDone < 2));
+    } while((res == SERVER_OFFLINE_ERROR_CODE) && (numRetriesDone < MAX_NUM_RETRIES));
 
     if (res < 0) {
         if (debugMode <= DebugLevel::LevelError) {
@@ -81,6 +83,8 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
 
     int res = 0;
     int numRetriesDone = 0;
+    unsigned int currentBackoff = INITIAL_BACKOFF_MS;
+
 
     do {
         ServerInfo* serverToContact = getServerToContact(key, consistency, true);
@@ -88,7 +92,7 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
              cout << __func__ << "\t : Contacting server "
                  << serverToContact->address << endl;
         }
-        res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency);
+        res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency, currentBackoff);
         if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
                 cout << __func__
@@ -97,8 +101,9 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
             }
             getSystemState();
             numRetriesDone++;
+            currentBackoff *= MULTIPLIER;
         }
-    } while((res == SERVER_OFFLINE_ERROR_CODE) && (numRetriesDone < 2));
+    } while((res == SERVER_OFFLINE_ERROR_CODE) && (numRetriesDone < MAX_NUM_RETRIES));
     
     if (res < 0) {
         if (debugMode <= DebugLevel::LevelError) {

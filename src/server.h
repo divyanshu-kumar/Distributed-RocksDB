@@ -205,6 +205,8 @@ class ServerReplication final : public DistributedRocksDBService::Service {
                  << " Backup Address: " << backupAddress << endl;
         }
 
+        // systemStateLock.lock();
+
         if (stubs.find(backupAddress) == stubs.end()) {
             cout << __func__ << " Backup Address : " << backupAddress 
                  << " not found in stubs." << endl;
@@ -213,7 +215,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
         WriteResult wres;
         bool isDone = false;
-        int numRetriesLeft = MAX_NUM_RETRIES;
+        int numRetriesLeft = 1;
         unsigned int currentBackoff = INITIAL_BACKOFF_MS;
 
         while (!isDone) {
@@ -229,7 +231,15 @@ class ServerReplication final : public DistributedRocksDBService::Service {
             ctx.set_wait_for_ready(true);
             ctx.set_deadline(deadline);
 
-            Status status = stubs[backupAddress]->rpc_write(&ctx, wreq, &wres);
+            std::shared_ptr<DistributedRocksDBService::Stub> backupStub = stubs[backupAddress];
+                // std::make_shared<DistributedRocksDBService::Stub>(stubs[backupAddress]);
+
+            if (backupStub == nullptr) {
+                cout << __func__ << "\t : Backup stub is erased. Skipping this write for key = " << key << endl;
+                break;
+            }
+
+            Status status = backupStub->rpc_write(&ctx, wreq, &wres);
             currentBackoff *= MULTIPLIER;
             if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED ||
                 numRetriesLeft-- == 0) {
@@ -242,6 +252,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
                 isDone = true;
             }
         }
+        // systemStateLock.unlock();
 
         if (wres.err() != 0) {
             if (debugMode <= DebugLevel::LevelInfo) {
@@ -296,6 +307,10 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     void execAsPrimary(const WriteRequest* wr, const unordered_set<string> &currentBackups) {
         writeToDB(to_string(wr->key()), wr->value());
+
+        if (currentBackups.empty()) {
+            return;
+        }
 
         if (wr->consistency() == getConsistencyString(Consistency::fast_acknowledge)) {
             std::thread asyncWriteThread(&ServerReplication::replicateToBackups, this, *wr, currentBackups);
@@ -539,9 +554,9 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
     }
 
-    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>>* getStubs() {
-        return &stubs;
-    }
+    // unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>>* getStubs() {
+    //     return &stubs;
+    // }
 
     TxnManager* getTxnManager() {
         return tm;
@@ -553,14 +568,14 @@ class ServerReplication final : public DistributedRocksDBService::Service {
     mutex systemStateLock;
     string primaryAddress;
     unordered_set<string> backups;
-    unordered_map<string, std::unique_ptr<DistributedRocksDBService::Stub>> stubs;
+    unordered_map<string, std::shared_ptr<DistributedRocksDBService::Stub>> stubs;
     vector<std::thread*> threadPool;
     std::queue<WriteInfo> writeQueue;
     std::mutex writeQMutex;
     std::condition_variable work, workDone;
 
 
-    grpc::Status execFlushInReplica(string ip, std::unique_ptr<DistributedRocksDBService::Stub> *stub) {
+    grpc::Status execFlushInReplica(string ip, std::shared_ptr<DistributedRocksDBService::Stub> stub) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Flush-START for ip:" << ip << endl;
         }
@@ -570,7 +585,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         TxnFlushReply reply;
 
         // TODO: need to populate request? for not stalling the write requests
-        grpc::Status status = (*stub)->rpc_flush(&context, request, &reply);
+        grpc::Status status = (stub)->rpc_flush(&context, request, &reply);
 
         if (status.ok()) {
             if (debugMode <= DebugLevel::LevelInfo) {
@@ -596,12 +611,24 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
 
         while(tm->getActiveTxnCount() != 0) {
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : Sleeping..." << endl;
+            }
             msleep(1);
         }
 
-        int REPLICA_COUNT = stubs.size();
+        int REPLICA_COUNT = backups.size();
+
+        if (REPLICA_COUNT == 0) {
+            tm->flush();
+            return;
+        }
 
         future<grpc::Status> flushes[REPLICA_COUNT];
+
+        if (debugMode <= DebugLevel::LevelInfo) {
+            cout << __func__ << "\t : Starting to flush at backups " << endl;
+        }
 
         int i = 0;
         for (const auto& b: backups) {
@@ -610,7 +637,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
                     << " not found in stubs." << endl;
                 continue;
             }
-            flushes[i] = async(launch::async, &ServerReplication::execFlushInReplica, this, b, &stubs[b]);
+            flushes[i] = async(launch::async, &ServerReplication::execFlushInReplica, this, b, stubs[b]);
             i++;
         }
 

@@ -30,7 +30,8 @@ class DistributedRocksDBClient {
         : stub_(DistributedRocksDBService::NewStub(channel)) {}
 
     int rpc_read(uint32_t key, string &value, bool isCachingEnabled, 
-                 string & clientIdentifier, const string &serverAddress, Consistency consistency) {
+                 string & clientIdentifier, const string &serverAddress, 
+                 Consistency consistency, const int timeout) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << " for server address: " << serverAddress 
                  << " Key: " << key << " Consistency: " 
@@ -39,49 +40,25 @@ class DistributedRocksDBClient {
 
         ReadResult rres;
 
-        bool isDone = false;
-        int numRetriesLeft = MAX_NUM_RETRIES;
-        unsigned int currentBackoff = INITIAL_BACKOFF_MS;
         int error_code = 0;
 
-        while (!isDone) {
-            ClientContext clientContext;
-            ReadRequest rr;
-            rr.set_key(key);
-            rr.set_requirecache(isCachingEnabled);
-            rr.set_consistency(getConsistencyString(consistency));
-            rr.set_clientidentifier(clientIdentifier);
+        ClientContext clientContext;
+        ReadRequest rr;
+        rr.set_key(key);
+        rr.set_requirecache(isCachingEnabled);
+        rr.set_consistency(getConsistencyString(consistency));
+        rr.set_clientidentifier(clientIdentifier);
 
-            // Set timeout for API
-            std::chrono::system_clock::time_point deadline =
-                std::chrono::system_clock::now() +
-                std::chrono::milliseconds(currentBackoff);
+        // Set timeout for API
+        std::chrono::system_clock::time_point deadline =
+            std::chrono::system_clock::now() +
+            std::chrono::milliseconds(timeout);
 
-            clientContext.set_wait_for_ready(true);
-            clientContext.set_deadline(deadline);
+        clientContext.set_wait_for_ready(true);
+        clientContext.set_deadline(deadline);
 
-            Status status = stub_->rpc_read(&clientContext, rr, &rres);
-            error_code = status.error_code();
-            currentBackoff *= MULTIPLIER;
-
-            if (status.error_code() == grpc::StatusCode::OK ||
-                numRetriesLeft-- == 0) {
-                isDone = true;
-            } else {
-                if (debugMode <= DebugLevel::LevelInfo) {
-                    printf("%s \t : Timed out to contact server.\n", __func__);
-                    cout << __func__
-                         << "\t : Error code = " << status.error_message()
-                         << endl;
-                }
-                if (debugMode <= DebugLevel::LevelError) {
-                    cout << __func__ << "\t : Retrying to server "
-                        << serverAddress << " with timeout (ms) of " 
-                        << currentBackoff << " MULTIPLIER = " << MULTIPLIER 
-                        << " for key = " << key << endl;
-                }
-            }
-        }
+        Status status = stub_->rpc_read(&clientContext, rr, &rres);
+        error_code = status.error_code();
 
         // case where server is not responding/offline
         if (error_code != grpc::StatusCode::OK) {
@@ -104,7 +81,8 @@ class DistributedRocksDBClient {
     }
 
     int rpc_write(uint32_t key, const string &value,
-         string & clientIdentifier, const string &serverAddress, Consistency consistency) {
+         string & clientIdentifier, const string &serverAddress, 
+         Consistency consistency, const int timeout) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << " for server address " << serverAddress 
                  << " Key: " << key << " Consistency: " 
@@ -113,48 +91,24 @@ class DistributedRocksDBClient {
 
         WriteResult wres;
 
-        bool isDone = false;
-        int numRetriesLeft = MAX_NUM_RETRIES;
-        unsigned int currentBackoff = INITIAL_BACKOFF_MS;
         int error_code = 0;
 
-        while (!isDone) {
-            ClientContext ctx;
-            WriteRequest wreq;
-            wreq.set_key(key);
-            wreq.set_value(value);
-            wreq.set_consistency(getConsistencyString(consistency));
-            wreq.set_clientidentifier(clientIdentifier);
+        ClientContext ctx;
+        WriteRequest wreq;
+        wreq.set_key(key);
+        wreq.set_value(value);
+        wreq.set_consistency(getConsistencyString(consistency));
+        wreq.set_clientidentifier(clientIdentifier);
 
-            std::chrono::system_clock::time_point deadline =
-                std::chrono::system_clock::now() +
-                std::chrono::milliseconds(currentBackoff);
+        std::chrono::system_clock::time_point deadline =
+            std::chrono::system_clock::now() +
+            std::chrono::milliseconds(timeout);
 
-            ctx.set_wait_for_ready(true);
-            ctx.set_deadline(deadline);
+        ctx.set_wait_for_ready(true);
+        ctx.set_deadline(deadline);
 
-            Status status = stub_->rpc_write(&ctx, wreq, &wres);
-            error_code = status.error_code();
-            currentBackoff *= MULTIPLIER;
-
-            if (status.error_code() == grpc::StatusCode::OK ||
-                numRetriesLeft-- == 0) {
-                isDone = true;
-            } else {
-                if (debugMode <= DebugLevel::LevelInfo) {
-                    printf("%s \t : Timed out to contact server.\n", __func__);
-                    cout << __func__
-                         << "\t : Error code = " << status.error_message()
-                         << endl;
-                }
-                if (debugMode <= DebugLevel::LevelError) {
-                    cout << __func__ << "\t : Retrying to "
-                         << serverAddress << " with timeout (ms) of "
-                         << currentBackoff 
-                         << " for key = " << key << endl;
-                }
-            }
-        }
+        Status status = stub_->rpc_write(&ctx, wreq, &wres);
+        error_code = status.error_code();
 
         if (error_code != grpc::StatusCode::OK) {
             if (debugMode <= DebugLevel::LevelError) {
@@ -343,11 +297,11 @@ public:
         if(!isWriteRequest && consistency == Consistency::eventual && !clusterInfo[clusterId].backupAddresses.empty()){
             string backupAddress = selectBackupServerForRead(clusterId);
             if (debugMode <= DebugLevel::LevelInfo) {
-                cout << __func__ << "selecting server "<< backupAddress << endl;
+                cout << __func__ << "\t : selecting server "<< backupAddress << endl;
             }
             
             if(serverInfos.find(backupAddress) == serverInfos.end()){
-                cout << __func__ << " could not find " << backupAddress <<" gRPC connection" << endl;
+                cout << __func__ << "\t :  could not find " << backupAddress <<" gRPC connection" << endl;
                 std::quick_exit( EXIT_SUCCESS );
             }
             return serverInfos[backupAddress];          
@@ -358,11 +312,11 @@ public:
         clusterInfo[clusterId].systemStateLock.unlock();
 
         if(serverInfos.find(primary) == serverInfos.end()){
-                cout << "ERR: No server info for primary address " << primary << endl;
+                cout << __func__ << "\t : ERR: No server info for primary address " << primary << endl;
                 std::quick_exit( EXIT_SUCCESS );
         }
         if (debugMode <= DebugLevel::LevelInfo) {
-                cout << __func__ << "selecting server "<< primary << endl;
+                cout << __func__ << "\t : selecting server "<< primary << endl;
         }
         return serverInfos[primary];
     }
@@ -384,6 +338,7 @@ public:
         if(needNotificationThread){
             notificationThread[keyRange] = (std::thread(cacheInvalidationListener, (serverInfos[primary]),
                                               isCachingEnabled, clientIdentifier, std::ref(cacheMap)));
+            notificationThread[keyRange].detach();
             msleep(1);
         }
     }
