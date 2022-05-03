@@ -194,7 +194,7 @@ int main(int argc, char *argv[]) {
         crashTestingEnabled = parseArgument(argumentString, "--crash=") == "true" ? true : false;
     }
 
-    const bool isCachingEnabled = true;
+    const bool isCachingEnabled = false;
 
     cout << "Num Clients = " << numClients << endl;
 
@@ -211,7 +211,7 @@ int main(int argc, char *argv[]) {
             threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
         else {
-            threads.push_back(thread(&Client::run_application, ourClients[i], 200));
+            threads.push_back(thread(&Client::run_application, ourClients[i], 400));
         }
     }
     for (int i = 0; i < numClients; i++) {
@@ -284,24 +284,28 @@ int Client::run_application(int NUM_RUNS = 50) {
         // Randomly decide on write consistency level 
         // (Current config - 50% chance for guaranteed durable writes)
         Consistency writeConsistency = ((int)dist7(rng) & 1) ? 
-                                            Consistency::fast_acknowledge : 
+                                            Consistency::strong : 
+                                            Consistency::strong;
+
+        Consistency readConsistency = ((int)dist7(rng) & 1) ? 
+                                            Consistency::strong : 
                                             Consistency::strong;
 
         double writeTime = write_wrapper(key, write_data, writeConsistency);
         writeTimes.push_back(make_pair(writeTime, key));
 
        
-        msleep((int)dist6(rng));
+        //msleep((int)dist6(rng));
 
-        double readTime = read_wrapper(key, value, Consistency::strong);
+        double readTime = read_wrapper(key, value, readConsistency);
         readTimes.push_back(make_pair(readTime, key));
 
-        msleep((int)dist6(rng));
+        //msleep((int)dist6(rng));
 
-        readTime = read_wrapper(key, value, Consistency::strong);
+        readTime = read_wrapper(key, value, readConsistency);
         readTimes.push_back(make_pair(readTime, key));
 
-        msleep((int)dist6(rng));
+        //msleep((int)dist6(rng));
     }
 
     return 0;

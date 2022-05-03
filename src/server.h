@@ -38,7 +38,7 @@ const int MAX_NUM_RETRIES = 5;
 const int INITIAL_BACKOFF_MS = 100;
 const int MULTIPLIER = 2;
 const int NUM_WORKER_THREADS = 100;
-const int TXN_FLUSH_THRESHOLD = 10;
+const int TXN_FLUSH_THRESHOLD = 100;
 
 string currentWorkDir, dataDirPath, writeTxLogsDirPath;
 
@@ -609,12 +609,19 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Starting to flush." << endl;
         }
+        struct timespec start, end;
+        if (debugMode <= DebugLevel::LevelInfo) 
+            get_time(&start);
 
         while(tm->getActiveTxnCount() != 0) {
             if (debugMode <= DebugLevel::LevelInfo) {
                 cout << __func__ << "\t : Sleeping..." << endl;
             }
             msleep(1);
+        }
+        if (debugMode <= DebugLevel::LevelInfo) {
+            get_time(&end);
+            cout << __func__ << "time for while loop " << get_time_diff(&start, &end) << endl;
         }
 
         int REPLICA_COUNT = backups.size();
@@ -703,11 +710,19 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         if (role == "primary" && tm->getInMemoryTxnCount() > TXN_FLUSH_THRESHOLD) {
             tm->acquireFlushLockForFlush();
 
+            struct timespec start, end;
+            if (debugMode <= DebugLevel::LevelInfo)
+                get_time(&start);
+
+
             if (debugMode <= DebugLevel::LevelInfo) {
                 cout << __func__ << "\t : Successfully acquired flush lock" << endl;
             }
-
             flush();
+            if (debugMode <= DebugLevel::LevelInfo) {
+                get_time(&end);
+                cout << __func__ << "time for complete flush " << get_time_diff(&start, &end) << endl;
+            }
 
             if (debugMode <= DebugLevel::LevelInfo) {
                 cout << __func__ << "\t : Releasing flush lock" << endl;
