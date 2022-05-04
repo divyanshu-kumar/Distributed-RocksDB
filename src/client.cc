@@ -20,7 +20,8 @@ bool cacheStalenessValidation(const uint32_t &key,
     return true;
 }
 
-int Client::client_read(const uint32_t key, string &value, Consistency consistency) {
+int Client::client_read(const uint32_t key, string &value, Consistency consistency, 
+                 struct timespec &start_time, struct timespec &end_time) {
     if (debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << "\t : Key = " << key
              << ", ReadFromBackup = " << readFromBackup << endl;
@@ -45,7 +46,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
                  << serverToContact->address << endl;
         }
         res = (serverToContact->connection)->rpc_read(key, value, isCachingEnabled, 
-                  clientIdentifier, serverToContact->address, consistency, currentBackoff);
+                  clientIdentifier, serverToContact->address, consistency, currentBackoff, start_time, end_time);
 
         if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
@@ -76,7 +77,8 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
     return res;
 }
 
-int Client::client_write(const uint32_t key, const string &value, Consistency consistency) {
+int Client::client_write(const uint32_t key, const string &value, 
+                         Consistency consistency, struct timespec &start_time, struct timespec &end_time) {
     if (debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << "\t : Key = " << key << endl;
     }
@@ -92,7 +94,8 @@ int Client::client_write(const uint32_t key, const string &value, Consistency co
              cout << __func__ << "\t : Contacting server "
                  << serverToContact->address << endl;
         }
-        res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency, currentBackoff);
+        res = (serverToContact->connection)->rpc_write(key, value, clientIdentifier, serverToContact->address, consistency, currentBackoff,
+                start_time, end_time);
         if (res == SERVER_OFFLINE_ERROR_CODE) {
             if (debugMode <= DebugLevel::LevelError) {
                 cout << __func__
@@ -141,7 +144,7 @@ void cacheInvalidationListener(
         }
     }
 
-    cout << __func__ << "\t : Stopped listening for notifications now." << endl;
+    // cout << __func__ << "\t : Stopped listening for notifications now." << endl;
 }
 
 
@@ -211,7 +214,7 @@ int main(int argc, char *argv[]) {
             threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
         else {
-            threads.push_back(thread(&Client::run_application, ourClients[i], 400));
+            threads.push_back(thread(&Client::run_application, ourClients[i], 50));
         }
     }
     for (int i = 0; i < numClients; i++) {
@@ -226,11 +229,11 @@ int main(int argc, char *argv[]) {
 
 double Client::write_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
     struct timespec write_start, write_end;
-    get_time(&write_start);
+    // get_time(&write_start);
 
-    int result = client_write(key, value, consistency);
+    int result = client_write(key, value, consistency, write_start, write_end);
 
-    get_time(&write_end);
+    // get_time(&write_end);
 
     if ((result < 0) &&
         (debugMode <= DebugLevel::LevelError)) {
@@ -246,11 +249,11 @@ double Client::write_wrapper(const uint32_t &key, string &value, const Consisten
 
 double Client::read_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
     struct timespec read_start, read_end;
-    get_time(&read_start);
+    // get_time(&read_start);
 
-    int result = client_read(key, value, consistency);
+    int result = client_read(key, value, consistency, read_start, read_end);
 
-    get_time(&read_end);
+    // get_time(&read_end);
 
     if ((result < 0) && (debugMode <= DebugLevel::LevelError)) {
             printf(
@@ -295,17 +298,17 @@ int Client::run_application(int NUM_RUNS = 50) {
         writeTimes.push_back(make_pair(writeTime, key));
 
        
-        //msleep((int)dist6(rng));
+        msleep((int)dist6(rng));
 
         double readTime = read_wrapper(key, value, readConsistency);
         readTimes.push_back(make_pair(readTime, key));
 
-        //msleep((int)dist6(rng));
+        msleep((int)dist6(rng));
 
         readTime = read_wrapper(key, value, readConsistency);
         readTimes.push_back(make_pair(readTime, key));
 
-        //msleep((int)dist6(rng));
+        msleep((int)dist6(rng));
     }
 
     return 0;

@@ -31,7 +31,8 @@ class DistributedRocksDBClient {
 
     int rpc_read(uint32_t key, string &value, bool isCachingEnabled, 
                  string & clientIdentifier, const string &serverAddress, 
-                 Consistency consistency, const int timeout) {
+                 Consistency consistency, const int timeout, 
+                 struct timespec &start_time, struct timespec &end_time) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << " for server address: " << serverAddress 
                  << " Key: " << key << " Consistency: " 
@@ -56,8 +57,10 @@ class DistributedRocksDBClient {
 
         clientContext.set_wait_for_ready(true);
         clientContext.set_deadline(deadline);
-
+        
+        get_time(&start_time);
         Status status = stub_->rpc_read(&clientContext, rr, &rres);
+        get_time(&end_time);
         error_code = status.error_code();
 
         // case where server is not responding/offline
@@ -82,7 +85,8 @@ class DistributedRocksDBClient {
 
     int rpc_write(uint32_t key, const string &value,
          string & clientIdentifier, const string &serverAddress, 
-         Consistency consistency, const int timeout) {
+         Consistency consistency, const int timeout, 
+          struct timespec &start_time, struct timespec &end_time) {
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << " for server address " << serverAddress 
                  << " Key: " << key << " Consistency: " 
@@ -107,7 +111,9 @@ class DistributedRocksDBClient {
         ctx.set_wait_for_ready(true);
         ctx.set_deadline(deadline);
 
+        get_time(&start_time);
         Status status = stub_->rpc_write(&ctx, wreq, &wres);
+        get_time(&end_time);
         error_code = status.error_code();
 
         if (error_code != grpc::StatusCode::OK) {
@@ -268,10 +274,12 @@ public:
     }
 
     int run_application(int NUM_RUNS);
-    int client_read(uint32_t key, string &value, Consistency consistency);
+    int client_read(uint32_t key, string &value, Consistency consistency,
+                        struct timespec &start_time, struct timespec &end_time);
     double read_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
 
-    int client_write(uint32_t key, const string &value, Consistency consistency);
+    int client_write(uint32_t key, const string &value, Consistency consistency
+                    , struct timespec &start_time, struct timespec &end_time);
     double write_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
 
     int getClusterIdForKey(int key) {

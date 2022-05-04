@@ -101,7 +101,7 @@ uint32_t TxnManager::getActiveTxnCount() {
 }
 
 uint32_t TxnManager::getInMemoryTxnCount() {
-    lock_guard<mutex> lock(put_lock);
+    // lock_guard<mutex> lock(put_lock);
     return txns.size();
 }
 
