@@ -55,14 +55,19 @@ sem_t sem_recovery, sem_register;
 
 struct timespec* max_time(struct timespec* t1, struct timespec* t2);
 
-struct WriteInfo {
+class WriteInfo {
+    public:
     int key;
     string value;
     string address;
-    std::atomic<int>& countSent;
+    std::atomic<int>* countSent;
 
-    WriteInfo(int k, string val, string addr, std::atomic<int>& count)
+    WriteInfo(int k, string val, string addr, std::atomic<int>* count)
         : key(k), value(val), address(addr), countSent(count) {}
+
+    WriteInfo(int k, string val, string addr)
+        : key(k), value(val), address(addr), countSent(nullptr) {
+        }
 };
 struct NotificationInfo {
     std::mutex clientStateLock;
@@ -313,8 +318,14 @@ class ServerReplication final : public DistributedRocksDBService::Service {
         }
 
         if (wr->consistency() == getConsistencyString(Consistency::fast_acknowledge)) {
-            std::thread asyncWriteThread(&ServerReplication::replicateToBackups, this, *wr, currentBackups);
-            asyncWriteThread.detach();
+            std::unique_lock<std::mutex> lock(writeQMutex);
+
+            for (auto& backupAddress : currentBackups) {
+                writeQueue.push(WriteInfo(wr->key(), wr->value(),
+                                            backupAddress));
+                work.notify_one();
+            }
+
         }
         else {
             replicateToBackups(*wr, currentBackups);
@@ -751,7 +762,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
                 key = writeInfo.key;
                 value = writeInfo.value;
                 address = writeInfo.address;
-                countSent = &(writeInfo.countSent);
+                countSent = (writeInfo.countSent);
 
                 if (debugMode <= DebugLevel::LevelInfo) {
                     cout << __func__ << "\t : Key " << key
@@ -762,8 +773,10 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
             sendWritesToBackups(address, key, value);
 
-            ++(*countSent);
-            workDone.notify_all();
+            if (countSent != nullptr) {
+                ++(*countSent);
+                workDone.notify_all();
+            }
         }
     }
     
@@ -774,7 +787,7 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
             for (auto& backupAddress : currentBackups) {
                 writeQueue.push(WriteInfo(wr.key(), wr.value(),
-                                            backupAddress, replicateCount));
+                                            backupAddress, &replicateCount));
                 work.notify_one();
             }
 
