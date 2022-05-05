@@ -219,9 +219,8 @@ int main(int argc, char** argv) {
 
     backupLastWriteTime.clear();
     
-    getCount = putCount = 0;
-    get_time(&lastGetTime);
-    get_time(&lastPutTime);
+    rpcCount = 0;
+    get_time(&lastRpcTime);
 
     RunServer(clusterId);
 
