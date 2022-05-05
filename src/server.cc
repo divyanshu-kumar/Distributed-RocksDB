@@ -7,12 +7,6 @@
 #include "rocksdb/options.h"
 #include "server.h"
 
-#if defined(OS_WIN)
-std::string kDBPath = "C:\\Windows\\TEMP\\rocksdb_distributed";
-#else
-std::string kDBPath = "/tmp/rocksdb/";
-#endif
-
 string getPrimaryAddress() {
     std::unique_ptr<DistributedRocksDBService::Stub> coordinator_stub_(
         DistributedRocksDBService::NewStub(grpc::CreateChannel(
@@ -225,6 +219,10 @@ int main(int argc, char** argv) {
 
     backupLastWriteTime.clear();
     
+    getCount = putCount = 0;
+    get_time(&lastGetTime);
+    get_time(&lastPutTime);
+
     RunServer(clusterId);
 
     delete serverReplication;

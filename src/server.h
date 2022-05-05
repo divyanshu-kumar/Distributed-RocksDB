@@ -7,6 +7,12 @@
 #include <execinfo.h>
 #include <signal.h>
 
+#if defined(OS_WIN)
+std::string kDBPath = "C:\\Windows\\TEMP\\rocksdb_distributed";
+#else
+std::string kDBPath = "/tmp/rocksdb/";
+#endif
+
 using grpc::Channel;
 using grpc::ClientContext;
 using grpc::ClientReader;
@@ -35,7 +41,7 @@ DB* db;
 
 // Constants
 const int MAX_NUM_RETRIES = 5;
-const int INITIAL_BACKOFF_MS = 100;
+const int INITIAL_BACKOFF_MS = 1000;
 const int MULTIPLIER = 2;
 const int NUM_WORKER_THREADS = 100;
 const int TXN_FLUSH_THRESHOLD = 100;
@@ -47,6 +53,10 @@ string storage_path;
 
 static unordered_map<int, std::mutex> blockLock;
 unordered_map<int, struct timespec> backupLastWriteTime;
+
+struct timespec lastGetTime, lastPutTime;
+int getCount, putCount, maxGetCount(0), maxPutCount(0);
+mutex getTimeMutex, putTimeMutex;
 
 bool crashTestingEnabled(false);
 bool writeThreadPoolEnabled(false);
@@ -169,12 +179,24 @@ static NotificationInfo notificationManager;
 
 class ServerReplication final : public DistributedRocksDBService::Service {
    public:
+    ofstream outGetTimeFile, outPutTimeFile;
     ReadCache readCache;
 
     ServerReplication(int cluster_id) 
         : threadPool(NUM_WORKER_THREADS), clusterId(cluster_id) {
+
+        const string getFile = kDBPath + "/getLoadServer.txt",
+                    putFile = kDBPath + "/putLoadServer.txt";
+        outGetTimeFile.open(getFile, ios::trunc);
+        outPutTimeFile.open(putFile, ios::trunc);
+
         // sometimes old values are cached, faced in P3, so needed
         stubs.clear();
+    }
+
+    ~ServerReplication() {
+        outGetTimeFile.close();
+        outPutTimeFile.close();
     }
 
     int getClusterId() {
@@ -269,6 +291,19 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     Status rpc_read(ServerContext* context, const ReadRequest* rr,
                     ReadResult* reply) override {
+        getTimeMutex.lock();
+        getCount++;
+        struct timespec currentTime;
+        get_time(&currentTime);
+        if (get_time_diff(&lastGetTime, &currentTime) > 1000) {
+            maxGetCount = max(maxGetCount, getCount);
+            outGetTimeFile << getCount << endl;
+            getCount = 0;
+            lastGetTime.tv_sec = currentTime.tv_sec;
+            lastGetTime.tv_nsec = currentTime.tv_nsec;
+        }
+        getTimeMutex.unlock();
+
         systemStateLock.lock();
         const string currentRole = role;
         systemStateLock.unlock();
@@ -340,6 +375,19 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     Status rpc_write(ServerContext* context, const WriteRequest* wr,
                      WriteResult* reply) override {
+        putTimeMutex.lock();
+        putCount++;
+        struct timespec currentTime;
+        get_time(&currentTime);
+        if (get_time_diff(&lastPutTime, &currentTime) > 1000) {
+            maxPutCount = max(maxPutCount, putCount);
+            outPutTimeFile << putCount << endl;
+            putCount = 0;
+            lastPutTime.tv_sec = currentTime.tv_sec;
+            lastPutTime.tv_nsec = currentTime.tv_nsec;
+        }
+        putTimeMutex.unlock();
+
         systemStateLock.lock();
         string currentRole(role);
         unordered_set<string> currentBackups(backups);
