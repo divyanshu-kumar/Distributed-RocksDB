@@ -55,6 +55,7 @@ string getConsistencyString(Consistency consistency){
         case Consistency::strong            : return "strong";
         case Consistency::eventual          : return "eventual";
         case Consistency::fast_acknowledge  : return "fast_acknowledge";
+        case Consistency::baseline          : return "baseline";
         default                             : return "strong";
     }
 }

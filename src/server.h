@@ -291,6 +291,24 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     Status rpc_read(ServerContext* context, const ReadRequest* rr,
                     ReadResult* reply) override {
+        if(rr->consistency() == getConsistencyString(Consistency::baseline)){
+            // baseline implementation of RocksDB over gRPC
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : baseline read for key: " << rr->key() << endl;
+            }
+            string buf;
+            int res = 0;
+
+            ROCKSDB_NAMESPACE::Status status =
+                db->Get(ReadOptions(), to_string(rr->key()), &buf);
+            assert(status.ok() || status.IsNotFound());
+
+            reply->set_value(buf);
+            reply->set_err(0);
+            return Status::OK;
+        }
+
+
         getTimeMutex.lock();
         getCount++;
         struct timespec currentTime;
@@ -375,6 +393,18 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     Status rpc_write(ServerContext* context, const WriteRequest* wr,
                      WriteResult* reply) override {
+        if(wr->consistency() == getConsistencyString(Consistency::baseline)){
+            // baseline rockdDB implementation 
+            if (debugMode <= DebugLevel::LevelInfo) {
+                cout << __func__ << "\t : baseline write for key: " << wr->key() << endl;
+            }
+            writeToDB(to_string(wr->key()), wr->value());
+            reply->set_err(0);
+
+            return Status::OK;
+        }
+
+
         putTimeMutex.lock();
         putCount++;
         struct timespec currentTime;

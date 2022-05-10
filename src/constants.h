@@ -19,4 +19,5 @@ enum Consistency {
     strong = 1,
     eventual = 2,
     fast_acknowledge = 3,
+    baseline = 4,
 };

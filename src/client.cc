@@ -28,10 +28,12 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
     }
 
     if (isCachingEnabled && cacheStalenessValidation(key, cacheMap)) {
+        get_time(&start_time);
         if (debugMode <= DebugLevel::LevelInfo) {
             cout << __func__ << "\t : Cached data found!" << endl;
         }
         value = cacheMap[key].data;
+        get_time(&end_time);
         return value.length();
     }
 
@@ -214,7 +216,7 @@ int main(int argc, char *argv[]) {
             threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
         else {
-            threads.push_back(thread(&Client::run_application, ourClients[i], 50));
+            threads.push_back(thread(&Client::run_application, ourClients[i], 100));
         }
     }
     for (int i = 0; i < numClients; i++) {
@@ -287,28 +289,27 @@ int Client::run_application(int NUM_RUNS = 50) {
         // Randomly decide on write consistency level 
         // (Current config - 50% chance for guaranteed durable writes)
         Consistency writeConsistency = ((int)dist7(rng) & 1) ? 
-                                            Consistency::strong : 
-                                            Consistency::strong;
+                                            Consistency::baseline : 
+                                            Consistency::baseline;
 
         Consistency readConsistency = ((int)dist7(rng) & 1) ? 
-                                            Consistency::strong : 
-                                            Consistency::strong;
-
+                                            Consistency::baseline : 
+                                            Consistency::baseline;
         double writeTime = write_wrapper(key, write_data, writeConsistency);
         writeTimes.push_back(make_pair(writeTime, key));
 
-       
         msleep((int)dist6(rng));
-
+        
+        
         double readTime = read_wrapper(key, value, readConsistency);
         readTimes.push_back(make_pair(readTime, key));
-
         msleep((int)dist6(rng));
 
         readTime = read_wrapper(key, value, readConsistency);
         readTimes.push_back(make_pair(readTime, key));
 
         msleep((int)dist6(rng));
+        
     }
 
     return 0;
