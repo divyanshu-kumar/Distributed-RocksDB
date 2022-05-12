@@ -9,6 +9,8 @@ int run_application(bool isReadOnlyMode);
 void printStats();
 void getRandomText(string &str, int size);
 
+int totalThroughput(0), totalGoodput(0);
+mutex throughputLock;
 vector<vector<pair<double, int>>> allReadTimes, allWriteTimes;
 void saveData(const vector<pair<double, int>> & v, const string & filename);
 
@@ -229,44 +231,48 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-double Client::write_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
+pair<double, bool> Client::write_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
     struct timespec write_start, write_end;
     // get_time(&write_start);
-
+    bool isRequestSuccess = true;
     int result = client_write(key, value, consistency, write_start, write_end);
 
     // get_time(&write_end);
 
-    if ((result < 0) &&
-        (debugMode <= DebugLevel::LevelError)) {
-        printf("Failed to set the key = %d\n", key);
+    if (result < 0) {
+        if (debugMode <= DebugLevel::LevelError) {
+            printf("Failed to set the key = %d\n", key);
+        }
+        isRequestSuccess = false;
     }
 
     if (debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << " \t : Written Key = " << key << ", value = " << value << endl;
     }
 
-    return get_time_diff(&write_start, &write_end);
+    return {get_time_diff(&write_start, &write_end), isRequestSuccess};
 }
 
-double Client::read_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
+pair<double, bool> Client::read_wrapper(const uint32_t &key, string &value, const Consistency &consistency){
     struct timespec read_start, read_end;
     // get_time(&read_start);
-
+    bool isRequestSuccess = true;
     int result = client_read(key, value, consistency, read_start, read_end);
 
     // get_time(&read_end);
 
-    if ((result < 0) && (debugMode <= DebugLevel::LevelError)) {
-            printf(
-                "Failed to get the key = %d!\n", key);
+    if (result < 0) {
+        if (debugMode <= DebugLevel::LevelError) {
+            printf("Failed to get the key = %d\n", key);
+        }
+        isRequestSuccess = false;
     }
 
     if (result == 0 && debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << " \t : Read Key = " << key << ", value = " << value << endl;
     }
 
-    return get_time_diff(&read_start, &read_end);
+    return {get_time_diff(&read_start, &read_end), isRequestSuccess};
 }
 
 int Client::run_application(int NUM_RUNS = 50) {
@@ -289,28 +295,44 @@ int Client::run_application(int NUM_RUNS = 50) {
         // Randomly decide on write consistency level 
         // (Current config - 50% chance for guaranteed durable writes)
         Consistency writeConsistency = ((int)dist7(rng) & 1) ? 
-                                            Consistency::baseline : 
-                                            Consistency::baseline;
+                                            Consistency::strong : 
+                                            Consistency::strong;
 
         Consistency readConsistency = ((int)dist7(rng) & 1) ? 
-                                            Consistency::baseline : 
-                                            Consistency::baseline;
-        double writeTime = write_wrapper(key, write_data, writeConsistency);
-        writeTimes.push_back(make_pair(writeTime, key));
+                                            Consistency::strong : 
+                                            Consistency::strong;
+        auto writeInfo = write_wrapper(key, write_data, writeConsistency);
+        if (writeInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        writeTimes.push_back(make_pair(writeInfo.first, key));
 
         msleep((int)dist6(rng));
         
         
-        double readTime = read_wrapper(key, value, readConsistency);
-        readTimes.push_back(make_pair(readTime, key));
+        auto readInfo = read_wrapper(key, value, readConsistency);
+        if (readInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        readTimes.push_back(make_pair(readInfo.first, key));
         msleep((int)dist6(rng));
 
-        readTime = read_wrapper(key, value, readConsistency);
-        readTimes.push_back(make_pair(readTime, key));
+        readInfo = read_wrapper(key, value, readConsistency);
+        if (readInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        readTimes.push_back(make_pair(readInfo.first, key));
 
         msleep((int)dist6(rng));
         
     }
+
+    lock_guard<mutex> lock(throughputLock);
+    totalThroughput += throughput;
+    totalGoodput += goodput;
 
     return 0;
 }
@@ -386,6 +408,9 @@ void printStats() {
         meanWriteTime, medianWriteTime, !writeTimes.empty() ? writeTimes.front().first : 0, !writeTimes.empty() ? writeTimes.back().first : 0);
 
     printPercentileTimes(readTimes, writeTimes);
+
+    cout << "Throughput,Goodput" << endl;
+    cout << totalThroughput << "," << totalGoodput << endl;
 
     if (!readTimes.empty()) 
         saveData(originalReadTimes, "readTimes.txt");

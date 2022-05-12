@@ -247,6 +247,7 @@ class ClusterState {
 class Client {
 
 public:
+    int throughput, goodput;
     bool readFromBackup, isCachingEnabled;
     int clientThreadId;
     map<int, ClusterState> clusterInfo;
@@ -259,7 +260,7 @@ public:
 
     Client(string coordinatorAddress, bool cachingEnabled, int threadId, 
                 bool isReadFromBackup = false) 
-        : clientThreadId(threadId),
+        : clientThreadId(threadId), throughput(0), goodput(0),
           coordinator_stub_(DistributedRocksDBService::NewStub(grpc::CreateChannel(
                 coordinatorAddress.c_str(), grpc::InsecureChannelCredentials()))) {
         isCachingEnabled = cachingEnabled;
@@ -276,11 +277,11 @@ public:
     int run_application(int NUM_RUNS);
     int client_read(uint32_t key, string &value, Consistency consistency,
                         struct timespec &start_time, struct timespec &end_time);
-    double read_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
+    pair<double, bool> read_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
 
     int client_write(uint32_t key, const string &value, Consistency consistency
                     , struct timespec &start_time, struct timespec &end_time);
-    double write_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
+    pair<double, bool> write_wrapper(const uint32_t &key, string &value, const Consistency &consistency);
 
     int getClusterIdForKey(int key) {
         lock_guard<mutex> lock(clusterInfoLock);
