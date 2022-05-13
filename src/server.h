@@ -344,6 +344,10 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
         reply->set_value(buf);
         reply->set_err(0);
+    
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : Read for key : " << rr->key() << ", returned value : " << reply->value() << endl;
+        }
 
         return Status::OK;
     }
@@ -389,6 +393,11 @@ class ServerReplication final : public DistributedRocksDBService::Service {
 
     Status rpc_write(ServerContext* context, const WriteRequest* wr,
                      WriteResult* reply) override {
+
+        if (debugMode <= DebugLevel::LevelError) {
+            cout << __func__ << "\t : Write for key : " << wr->key() << " with value : " << wr->value() << endl;
+        }
+
         if(wr->consistency() == getConsistencyString(Consistency::baseline)){
             // baseline rockdDB implementation 
             if (debugMode <= DebugLevel::LevelInfo) {

@@ -45,7 +45,7 @@ int Client::client_read(const uint32_t key, string &value, Consistency consisten
 
     do {
         ServerInfo* serverToContact = getServerToContact(key, consistency, false);
-        if (debugMode <= DebugLevel::LevelInfo) {
+        if (debugMode <= DebugLevel::LevelError) {
             cout << __func__ << "\t : Contacting server "
                  << serverToContact->address << endl;
         }
@@ -94,7 +94,7 @@ int Client::client_write(const uint32_t key, const string &value,
 
     do {
         ServerInfo* serverToContact = getServerToContact(key, consistency, true);
-        if (debugMode <= DebugLevel::LevelInfo) {
+        if (debugMode <= DebugLevel::LevelError) {
              cout << __func__ << "\t : Contacting server "
                  << serverToContact->address << endl;
         }
@@ -215,7 +215,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < numClients; i++) {
         if (crashTestingEnabled) {
             //threads.push_back(thread(&Client::run_application_crashTesting, ourClients[i], 10));
-            threads.push_back(thread(&Client::run_application, ourClients[i], 100));
+            threads.push_back(thread(&Client::run_application_data_consistency, ourClients[i], 1));
         }
         else {
             threads.push_back(thread(&Client::run_application, ourClients[i], 100));
@@ -247,7 +247,7 @@ pair<double, bool> Client::write_wrapper(const uint32_t &key, string &value, con
     }
 
     if (debugMode <= DebugLevel::LevelInfo) {
-        cout << __func__ << " \t : Written Key = " << key << ", value = " << value << endl;
+        cout << __func__ << " \t : Writing Key : " << key << " with value : " << value << endl;
     }
 
     return {get_time_diff(&write_start, &write_end), isRequestSuccess};
@@ -270,6 +270,10 @@ pair<double, bool> Client::read_wrapper(const uint32_t &key, string &value, cons
 
     if (result == 0 && debugMode <= DebugLevel::LevelInfo) {
         cout << __func__ << " \t : Read Key = " << key << ", value = " << value << endl;
+    }
+
+    if (debugMode <= DebugLevel::LevelInfo) {
+        cout << __func__ << " \t : Read Key : " << key << ", returned value : " << value << endl;
     }
 
     return {get_time_diff(&read_start, &read_end), isRequestSuccess};
@@ -317,17 +321,113 @@ int Client::run_application(int NUM_RUNS = 50) {
         }
         throughput++;
         readTimes.push_back(make_pair(readInfo.first, key));
-        msleep((int)dist6(rng));
 
-        readInfo = read_wrapper(key, value, readConsistency);
+        if (value != write_data) {
+            cout << __func__ << " \t : Data mismatch, written data != read data." << endl;
+        }
+
+        msleep((int)dist6(rng));
+        
+    }
+
+    lock_guard<mutex> lock(throughputLock);
+    totalThroughput += throughput;
+    totalGoodput += goodput;
+
+    return 0;
+}
+
+int Client::run_application_data_consistency(int NUM_RUNS) {
+    vector<pair<double, int>> &readTimes = allReadTimes[clientThreadId],
+                              &writeTimes = allWriteTimes[clientThreadId];
+
+    string write_data;
+
+    std::random_device dev;
+    std::mt19937 rng(dev());
+    std::uniform_int_distribution<std::mt19937::result_type> dist6(0, 50);
+    std::uniform_int_distribution<std::mt19937::result_type> dist7(0, (int)1e6);
+
+    for (int i = 0; i < NUM_RUNS; i++) {
+        getRandomText(write_data, 10);
+    
+        string value;
+        uint32_t key = (int)dist7(rng);
+
+        auto writeInfo = write_wrapper(key, write_data, Consistency::strong);
+        if (writeInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        writeTimes.push_back(make_pair(writeInfo.first, key));
+
+        msleep((int)dist6(rng));
+        
+        cout << __func__ << "\t : Key = " << key << ", Data written = " << write_data << endl;
+        
+        auto readInfo = read_wrapper(key, value, Consistency::strong);
         if (readInfo.second) {
             goodput++;
         }
         throughput++;
         readTimes.push_back(make_pair(readInfo.first, key));
 
+        cout << __func__ << "\t : Key = " << key << ", Data read from primary = " << value << endl;
+
+        if (value != write_data) {
+            cout << __func__ << " \t : Data mismatch, written data != read data." << endl;
+        }
+
+        readInfo = read_wrapper(key, value, Consistency::eventual);
+        if (readInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        readTimes.push_back(make_pair(readInfo.first, key));
+
+        cout << __func__ << "\t : Key = " << key << ", Data read from backup = " << value << endl;
+
+        msleep((int)dist6(rng));
+        char c;
+        cout << __func__ << "\t : Now crash a backup node and a write will be verified." << endl;
+        msleep(2000);
+        cout << __func__ << "\t : Press any key to continue writing.." << endl;
+        cin >> c;
+
+        getRandomText(write_data, 10);
+        writeInfo = write_wrapper(key, write_data, Consistency::strong);
+        if (writeInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        writeTimes.push_back(make_pair(writeInfo.first, key));
+
         msleep((int)dist6(rng));
         
+        cout << __func__ << "\t : Key = " << key << ", Data written = " << write_data << endl;
+        
+        readInfo = read_wrapper(key, value, Consistency::strong);
+        if (readInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        readTimes.push_back(make_pair(readInfo.first, key));
+
+        cout << __func__ << "\t : Key = " << key << ", Data read from primary = " << value << endl;
+
+        cout << __func__ << "\t : Now start the crashed backup node and we will read same key from the recovered node." << endl;
+        msleep(2000);
+        cout << __func__ << "\t : Press any key to continue reading from backup.." << endl;
+        cin >> c;
+
+        readInfo = read_wrapper(key, value, Consistency::eventual);
+        if (readInfo.second) {
+            goodput++;
+        }
+        throughput++;
+        readTimes.push_back(make_pair(readInfo.first, key));
+
+        cout << __func__ << "\t : Key = " << key << ", Data read from backup = " << value << endl;
     }
 
     lock_guard<mutex> lock(throughputLock);

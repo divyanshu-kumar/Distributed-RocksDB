@@ -275,6 +275,7 @@ public:
     }
 
     int run_application(int NUM_RUNS);
+    int run_application_data_consistency(int NUM_RUNS);
     int client_read(uint32_t key, string &value, Consistency consistency,
                         struct timespec &start_time, struct timespec &end_time);
     pair<double, bool> read_wrapper(const uint32_t &key, string &value, const Consistency &consistency);

@@ -76,10 +76,13 @@ void RunRecovery() {
 
     stream->Write(request);
 
+    int count = 0;
+
     while(1) {
         stream->Read(&reply);
-
+        count += reply.txns().size();
         if (reply.replytype() == RecoveryReplyType::TXNS_DONE) {
+            cout << "[INFO:RunRecovery]: Recovered " << count << " keys!" << endl;
             break;
         }
 
