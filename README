@@ -1,0 +1,89 @@
+**GitHub Repo** : https://github.com/divyanshu-kumar/Distributed-RocksDB
+
+---------------EXECUTION COMMANDS---------------
+------------------------------------------------
+
+To run any command from the example below, change the dir to Distributed-RocksDB/src/ and execute as belows:
+
+First, a coordinator should be started. For example, to start a 2 shard configured coordinator, start it as belows:
+**Coordinator** : ./cmake/build/coordinator --my_address=128.105.144.171:50051 --num_clusters=2
+
+Arguments Info:
+[--coordinator_address=] should specify the IP:PORT of the coordinator
+[--num_clusters=] is an optional argument which defaults to 1, but if mentioned should specify the number of shards in the system
+
+
+Then servers should be started, for example for a 2 cluster-shard configuration and a Primary and 1 Backup per shard combination - 
+**Primary/Backup Servers** :
+Cluster 1, P : ./cmake/build/server --coordinator_address=128.105.144.171:50051 --my_address=128.105.144.171:50052 --cluster_id=0 --writeThreadPool=true
+Cluster 1, B : ./cmake/build/server --coordinator_address=128.105.144.171:50051 --my_address=128.105.144.171:50053 --cluster_id=0 --writeThreadPool=true
+Cluster 2, P : ./cmake/build/server --coordinator_address=128.105.144.171:50051 --my_address=128.105.144.171:50054 --cluster_id=1 --writeThreadPool=true
+Cluster 2, B : ./cmake/build/server --coordinator_address=128.105.144.171:50051 --my_address=128.105.144.171:50055 --cluster_id=1 --writeThreadPool=true
+
+Arguments Info:
+[--coordinator_address=] should specify the IP:PORT of the coordinator
+[--my_address=] should specify the IP:PORT of the current entity
+[--cluster_id=] is an optional argument which defaults to 0, but if mentioned should specify the shard ID in which to instantiate this server
+[--writeThreadPool=] is an optional feature which enables the Multi-Producer Multi-Consumer thread pool implementation to replicate write requests
+
+The clients are started as below:
+**Client** : 
+./cmake/build/client --coordinator_address=128.105.144.171:50051 --num_clients=10
+
+Arguments Info:
+[--coordinator_address=] should specify the IP:PORT of the coordinator
+[--num_clients=] specifies the number of concurrent application threads for this client library.
+[--crash=] specifies whether to test data consistency in crash scenario
+
+---------------STRUCTURE OF CODE---------------
+-----------------------------------------------
+
+All the source code files are in Distributed-RocksDB/src/
+
+server.cc -
+RunRecovery() : runs the reintegration process at startup of node in case the role from coordinator is assigned as Backup
+dumpToDB() : we get batched writes during reintegration and we write all of these transactions to our data store
+flush_recovery() : specialized flush to checkpoint the recovered writes
+getPrimaryAddress() : calls the coordinator to get system state and extracts the primary address for that cluster
+
+client.cc -
+cacheInvalidationListener() : streaming rpc that actively listens for cache invalidations from server
+cacheStalenessValidation() : checks whether the data is cached or not and the lease is valid or not
+
+client.h -
+DistributedRocksDBClient::rpc_subscribeForNotifications() : client registers a streaming rpc for cache invalidations
+DistributedRocksDBClient::rpc_unSubscribeForNotifications() : cleint de-registers a streaming rpc for cache invalidations
+Client::run_application() : application code to test read/write times and measure their latencies
+Client::run_application_data_consistency() : application code to validate data consistency in case of server failures
+Client::getClusterIdForKey() : get the shard/cluster responsible for the given key
+Client::getServerToContact() : get the server information to be contacted based on read consistency semantic 
+Client::updateSystemState() : updates the current system state by contacting coordinator service
+Client::getSystemState() : get the current system state by contacting coordinator service
+
+server.h -
+class NotificationInfo() :  used to manage cache subscriptions and invalidations
+ServerReplication::rpc_read() : used to cater incoming application read requests and register cache requests (if enabled)
+ServerReplication::rpc_write() : used to cater incoming application write requests 1) responsible for replicating the write in parallel to the backups 2) perform local writes 3) invalidate the cache for listening readers
+ServerReplication::rpc_heartbeat() : maintains a heartbeat with coordinator service
+ServerReplication::rpc_flush() : directs all the backup nodes to checkpoint their current state.
+ServerReplication::rpc_recover() : serves the recover request from a new recovering backup node
+ServerReplication::flush() : flushes the local state to a checkpoint durably
+ServerReplication::updateSystemView() : updates the current system state by contacting coordinator service
+ServerReplication::replicateToBackups() : responsible for replication. Depending upon consistency semantics of write (durable or fast acknowledge) does a sync/async replication before acknowledging to the client
+registerServer() : registers the server with coordinator service at startup
+
+coordinator.h -
+ClusterCoordinator::addNode() : adds a node to the corresponding cluster. returns the role to the server (primary/backup)
+ClusterCoordinator::electPrimary() : In case of no primary (either due to failure or new shard), elects a primary node out of available nodes
+MasterCoordinator::establishHeartbeat() : establishes heartbeat with the existing servers via streaming rpc
+MasterCoordinator::rpc_registerNewNode() : registers a new node to a cluster
+MasterCoordinator::rpc_getSystemState() : returns the current system state 
+
+
+---------------TESTING CODE---------------
+------------------------------------------
+
+Client::run_application() : application code to test read/write times and measure their latencies
+Client::run_application_data_consistency() : application code to validate data consistency in case of server failures
+
+Both of these functions do the read writes for NUM_RUNS (configured in main() of client.cc) iterations. The former tests the performance of the system and the latter tests the data consistency in the face of failures.
